@@ -1,0 +1,80 @@
+# Local / Docker Desktop (NÃO-Swarm) — para testar tudo na sua máquina.
+#   cp .env.example .env   # ajuste hosts: postgres/rabbitmq/redis e LICENSE_REQUIRED=false
+#   docker compose -f docker-compose.local.yml up -d --build
+#   acesse http://localhost:3000
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wootrico}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wootrico}
+      POSTGRES_DB: ${POSTGRES_DB:-wootrico}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-wootrico} -d ${POSTGRES_DB:-wootrico}']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-wootrico}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-wootrico}
+    ports:
+      - '${RABBITMQ_UI_PORT:-15673}:15672' # management UI (host configurável)
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--save', '60', '1', '--appendonly', 'no']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  app:
+    image: ${WOOTRICO_IMAGE:-ericoautomacao/wootrico-v2:latest}
+    # Imagem multi-arch (amd64+arm64): o Docker baixa a variante nativa do host,
+    # sem emulação. Deixe WOOTRICO_PLATFORM vazio para auto-seleção; defina só se
+    # quiser forçar uma arquitetura específica (ex: linux/amd64).
+    platform: ${WOOTRICO_PLATFORM:-}
+    # Para buildar localmente em vez de puxar do Hub, comente a linha 'image' acima e descomente.
+    # IMPORTANTE: use o target 'runtime-app' (imagem do cliente, sem o servidor de licença):
+    # build: { context: ., dockerfile: Dockerfile, target: runtime-app }
+    restart: unless-stopped
+    env_file: .env
+    command: >-
+      sh -c "pnpm --filter @wootrico/db exec prisma migrate deploy &&
+             node apps/panel-api/dist/server.cjs"
+    ports:
+      - '${PANEL_PORT:-8789}:3000' # porta do host configurável (padrão pouco comum)
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker:
+    image: ${WOOTRICO_IMAGE:-ericoautomacao/wootrico-v2:latest}
+    platform: ${WOOTRICO_PLATFORM:-}
+    # build: { context: ., dockerfile: Dockerfile, target: runtime-app }
+    restart: unless-stopped
+    env_file: .env
+    command: node apps/worker/dist/main.cjs
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      app: { condition: service_started }
+
+volumes:
+  pgdata:

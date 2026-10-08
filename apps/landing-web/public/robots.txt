@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://wootrico.ericorenato.com.br/sitemap.xml

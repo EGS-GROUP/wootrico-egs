@@ -1,0 +1,39 @@
+# VENDOR-ONLY: the central license server + admin panel (you host this, not your customers).
+# Uses the SEPARATE vendor image (runtime-license target) — never the customer image.
+#   docker build --target runtime-license -t ericoautomacao/wootrico-license:latest .
+#   cp apps/license-server/.env.example apps/license-server/.env   # fill secrets
+#   docker compose -f docker-compose.license-server.yml up -d
+# Admin panel is served by the license-server at http://<host>:4000/ (login with
+# LICENSE_ADMIN_EMAIL / LICENSE_ADMIN_PASSWORD).
+services:
+  license-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-license}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-license}
+      POSTGRES_DB: ${POSTGRES_DB:-license}
+    volumes:
+      - license_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-license} -d ${POSTGRES_DB:-license}']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  license-server:
+    image: ${WOOTRICO_LICENSE_IMAGE:-ericoautomacao/wootrico-license:latest}
+    platform: ${WOOTRICO_PLATFORM:-}
+    restart: unless-stopped
+    env_file: apps/license-server/.env
+    command: >-
+      sh -c "pnpm --filter @wootrico/license-server exec prisma migrate deploy &&
+             node apps/license-server/dist/server.cjs"
+    depends_on:
+      license-postgres:
+        condition: service_healthy
+    ports:
+      - '4000:4000'
+
+volumes:
+  license_pgdata:

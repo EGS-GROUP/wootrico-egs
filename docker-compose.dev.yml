@@ -1,0 +1,47 @@
+# Dev-only infra: Postgres + RabbitMQ + Redis. Run `pnpm dev:db` then `pnpm dev`.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wootrico-dev-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wootrico
+      POSTGRES_PASSWORD: wootrico
+      POSTGRES_DB: wootrico
+    ports:
+      - '5432:5432'
+    volumes:
+      - wootrico_dev_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U wootrico -d wootrico']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: wootrico-dev-rabbit
+    restart: unless-stopped
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 5s
+      timeout: 10s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: wootrico-dev-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  wootrico_dev_pgdata:

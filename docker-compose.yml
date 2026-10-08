@@ -1,0 +1,121 @@
+# Wootrico v2 — Docker Swarm stack.
+#   docker build -t wootrico:latest .                 # (feito pelo install.sh)
+#   set -a; . ./.env; set +a
+#   docker stack deploy -c docker-compose.yml --resolve-image never wootrico
+#
+# A topologia do RabbitMQ e as migrações do banco são criadas automaticamente
+# no boot do app. Sem depends_on por condição em Swarm — os serviços reiniciam
+# (restart_policy) até as dependências ficarem prontas.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wootrico}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wootrico}
+      POSTGRES_DB: ${POSTGRES_DB:-wootrico}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [wootrico]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-wootrico} -d ${POSTGRES_DB:-wootrico}']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    deploy:
+      replicas: 1
+      restart_policy: { condition: any, delay: 5s }
+      placement: { constraints: [node.role == manager] }
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-wootrico}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-wootrico}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks: [wootrico]
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    deploy:
+      replicas: 1
+      restart_policy: { condition: any, delay: 5s }
+      placement: { constraints: [node.role == manager] }
+      # Hard ceiling for the broker. Without it RabbitMQ sizes its memory alarm
+      # from the HOST's total RAM (40% of it), so on a VPS shared with Chatwoot
+      # it can grow until the whole machine chokes — and a blocked broker is
+      # exactly what stalls the webhook pipeline. With a cgroup limit set, the
+      # alarm is computed from THIS value instead (default watermark 0.4, i.e.
+      # ~410M for 1G), which trips long before the kernel would OOM-kill.
+      # NOTE: do NOT add RABBITMQ_VM_MEMORY_HIGH_WATERMARK as an env var — it is
+      # deprecated since RabbitMQ 3.9 and the image REFUSES TO BOOT with it set.
+      resources:
+        limits:
+          memory: ${RABBITMQ_MEMORY_LIMIT:-1G}
+
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--save', '60', '1', '--appendonly', 'no']
+    volumes:
+      - redis_data:/data
+    networks: [wootrico]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    deploy:
+      replicas: 1
+      restart_policy: { condition: any, delay: 5s }
+      placement: { constraints: [node.role == manager] }
+
+  app:
+    image: ${WOOTRICO_IMAGE:-ericoautomacao/wootrico-v2:latest}
+    platform: ${WOOTRICO_PLATFORM:-}
+    env_file: .env
+    command: >-
+      sh -c "pnpm --filter @wootrico/db exec prisma migrate deploy &&
+             node apps/panel-api/dist/server.cjs"
+    networks: [wootrico]
+    deploy:
+      replicas: 1
+      restart_policy: { condition: any, delay: 5s }
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.wootrico.rule=Host(`${DOMAIN}`)
+        - traefik.http.routers.wootrico.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+        - traefik.http.routers.wootrico.tls=true
+        - traefik.http.routers.wootrico.tls.certresolver=${TRAEFIK_RESOLVER:-letsencryptresolver}
+        - traefik.http.routers.wootrico.service=wootrico
+        - traefik.http.services.wootrico.loadbalancer.server.port=3000
+        - traefik.http.services.wootrico.loadbalancer.passHostHeader=true
+
+  worker:
+    image: ${WOOTRICO_IMAGE:-ericoautomacao/wootrico-v2:latest}
+    platform: ${WOOTRICO_PLATFORM:-}
+    env_file: .env
+    # Run pending migrations before starting (Prisma takes a Postgres advisory
+    # lock, so racing the `app` service is safe — one waits for the other). This
+    # stops the worker from booting against a not-yet-migrated DB.
+    command: >-
+      sh -c "pnpm --filter @wootrico/db exec prisma migrate deploy &&
+             node apps/worker/dist/main.cjs"
+    networks: [wootrico]
+    deploy:
+      replicas: 1
+      restart_policy: { condition: any, delay: 5s }
+
+# Traefik vive em docker-compose.traefik.yml (overlay opcional) — o install.sh só
+# o adiciona quando NÃO há um Traefik já rodando no host (evita duplicar 80/443).
+
+networks:
+  wootrico:
+    driver: overlay
+    attachable: true
+
+volumes:
+  pgdata:
+  rabbitmq_data:
+  redis_data:

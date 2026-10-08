@@ -1,0 +1,99 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: #000;
+}
+
+/* ── custom animations / effects ported from design-modelo.html ── */
+
+.flashlight-card {
+  position: relative;
+  overflow: hidden;
+  --mouse-x: 50%;
+  --mouse-y: 50%;
+  transition: border-color 0.3s;
+  isolation: isolate;
+}
+.flashlight-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    600px circle at var(--mouse-x) var(--mouse-y),
+    rgba(255, 255, 255, 0.04),
+    transparent 40%
+  );
+  opacity: 0;
+  transition: opacity 0.5s;
+  pointer-events: none;
+  z-index: 1;
+}
+.flashlight-card:hover::before {
+  opacity: 1;
+}
+
+.reveal-on-scroll {
+  opacity: 0;
+  transform: translateY(30px) scale(0.96);
+  filter: blur(12px);
+  transition: all 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: opacity, transform, filter;
+}
+.reveal-on-scroll.is-visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  filter: blur(0);
+}
+
+@keyframes barGrow {
+  0% {
+    transform: scaleY(0);
+    opacity: 0;
+  }
+  100% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+.animate-bar {
+  animation: barGrow 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transform-origin: bottom;
+}
+
+@keyframes floatCard {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+.float-card {
+  animation: floatCard 6s ease-in-out infinite;
+}
+
+/* subtle scrollbar to match dark theme */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.16);
+}

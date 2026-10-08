@@ -1,0 +1,36 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+
+# prisma
+packages/db/generated/
+**/generated/client/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+!.env.compose.example
+
+# logs
+*.log
+logs/
+
+# editor / os
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# reference material (kept locally, not part of the product)
+reference/
+design/
+
+# vite
+apps/panel-web/dist/

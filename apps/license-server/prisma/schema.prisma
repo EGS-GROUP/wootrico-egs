@@ -1,0 +1,187 @@
+// license-server — vendor-hosted, separate database.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("LICENSE_DATABASE_URL")
+}
+
+model LicenseKey {
+  id             String       @id @default(uuid())
+  keyHash        String       @unique @map("key_hash")
+  // 'trial' (free, time-limited) or 'paid' (bought or admin-granted, expiry
+  // default 1 year, renewable). Neither is lifetime — every key has an expiry.
+  plan           String       @default("trial")
+  email          String?
+  name           String?
+  provisionedBy  String       @default("admin") @map("provisioned_by")
+  features       Json?
+  maxActivations Int          @default(1) @map("max_activations")
+  // Raw key parked for an ADMIN-GRANTED trial: the customer never types a key,
+  // the server hands it over on provision (matched by e-mail). Null for
+  // self-service trials and paid keys (those store only the hash).
+  issuedKey      String?      @map("issued_key")
+  // Per-license secret delivered to active instances over the validated channel.
+  // The customer image derives the integration-credential encryption key from it,
+  // so a fake "always-active" server cannot unlock the product (it lacks this).
+  secret         String?
+  // Expiry instant — every key has one (trial ~14d, paid ~1y). Never null in
+  // practice; a missing value is treated as expired (there are no lifetime keys).
+  expiresAt      DateTime?    @map("expires_at")
+  revokedAt      DateTime?    @map("revoked_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  activations    Activation[]
+
+  @@map("license_keys")
+}
+
+model Activation {
+  id              String     @id @default(uuid())
+  licenseKeyId    String     @map("license_key_id")
+  licenseKey      LicenseKey @relation(fields: [licenseKeyId], references: [id], onDelete: Cascade)
+  instanceId      String     @map("instance_id")
+  appVersion      String?    @map("app_version")
+  publicBaseUrl   String?    @map("public_base_url")
+  firstIp         String?    @map("first_ip")
+  lastIp          String?    @map("last_ip")
+  boundAt         DateTime   @default(now()) @map("bound_at")
+  lastHeartbeatAt DateTime?  @map("last_heartbeat_at")
+  lastTelemetry   Json?      @map("last_telemetry")
+  revokedAt       DateTime?  @map("revoked_at")
+
+  @@unique([licenseKeyId, instanceId])
+  @@index([instanceId])
+  @@map("activations")
+}
+
+/// Webhook authentication keys (payment provider → license server).
+/// The vendor creates/rotates/revokes these in the admin panel; the raw key is
+/// shown once and stored only as a SHA256 hash.
+model WebhookKey {
+  id         String    @id @default(uuid())
+  keyHash    String    @unique @map("key_hash")
+  name       String?
+  lastUsedAt DateTime? @map("last_used_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@map("webhook_keys")
+}
+
+/// A pending/settled purchase tied to a specific installation. Created when the
+/// customer clicks "buy" (we record which instanceId is buying); settled by the
+/// payment webhook, which mints a paid key and delivers it back to that instance.
+model PurchaseIntent {
+  id           String    @id @default(uuid())
+  instanceId   String    @map("instance_id")
+  email        String?
+  status       String    @default("pending") // pending | paid | cancelled
+  licenseKeyId String?   @map("license_key_id")
+  issuedKey    String?   @map("issued_key") // raw paid key, delivered to the client once
+  paymentRef   String?   @map("payment_ref") // external id, for idempotency
+  createdAt    DateTime  @default(now()) @map("created_at")
+  paidAt       DateTime? @map("paid_at")
+
+  @@index([email, status, createdAt])
+  @@index([instanceId])
+  @@map("purchase_intents")
+}
+
+// Payment ledger — every payment event received (Hotmart or other), for history
+// per-key, per-user and overall, and to drive the payments dashboard. Idempotent
+// by `transaction`. `kind`: purchase | renewal | refund | chargeback | cancel.
+model Payment {
+  id           String   @id @default(uuid())
+  // provider transaction id (Hotmart). Idempotency is per (transaction, event) —
+  // a refund reuses the purchase transaction id, so transaction alone isn't unique.
+  transaction  String?
+  provider     String   @default("hotmart")
+  event        String?  // raw provider event (e.g. PURCHASE_APPROVED)
+  kind         String   @default("purchase") // purchase | renewal | refund | chargeback | cancel
+  status       String?  // applied | ignored | rejected
+  email        String?
+  instanceId   String?  @map("instance_id")
+  licenseKeyId String?  @map("license_key_id")
+  amount       Float?
+  currency     String?
+  expiresAt    DateTime? @map("expires_at") // key expiry resulting from this payment
+  raw          Json?    // full provider payload (for audit)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([transaction, event])
+  @@index([email, createdAt])
+  @@index([licenseKeyId, createdAt])
+  @@index([kind, createdAt])
+  @@index([createdAt])
+  @@map("payments")
+}
+
+// Support requests opened by customers from their panel. Registered regardless of
+// license status (so the vendor sees trial/expired users too); only paid-active
+// customers are redirected to the support WhatsApp from the panel.
+model SupportTicket {
+  id           String   @id @default(uuid())
+  instanceId   String?  @map("instance_id")
+  licenseKeyId String?  @map("license_key_id")
+  email        String?
+  plan         String? // trial | paid | null (at the time of the request)
+  message      String
+  status       String   @default("open") // open | resolved
+  createdAt    DateTime @default(now()) @map("created_at")
+  resolvedAt   DateTime? @map("resolved_at")
+
+  @@index([status, createdAt])
+  @@index([email, createdAt])
+  @@map("support_tickets")
+}
+
+model HeartbeatLog {
+  id           String   @id @default(uuid())
+  licenseKeyId String   @map("license_key_id")
+  instanceId   String   @map("instance_id")
+  telemetry    Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([licenseKeyId, createdAt])
+  @@map("heartbeat_log")
+}
+
+/// Unified, LGPD-safe access/usage log. Stores only operational metadata
+/// (event type, ip, app version, instanceId, timestamps) — never message
+/// or conversation content.
+model LicenseEvent {
+  id           String   @id @default(uuid())
+  licenseKeyId String?  @map("license_key_id")
+  instanceId   String?  @map("instance_id")
+  type         String
+  ip           String?
+  appVersion   String?  @map("app_version")
+  meta         Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([licenseKeyId, createdAt])
+  @@index([createdAt])
+  @@map("license_events")
+}
+
+/// Singleton row holding vendor-configurable server settings (edited from the
+/// admin panel). `logRetentionDays` drives the periodic purge of license_events
+/// and heartbeat_log; null = keep forever (default).
+model ServerSettings {
+  id               String   @id @default("singleton")
+  logRetentionDays Int?     @map("log_retention_days")
+  // Payment config, editable from the admin panel (falls back to env when null).
+  checkoutUrl      String?  @map("checkout_url") // Hotmart checkout link
+  hotmartHottok    String?  @map("hotmart_hottok") // Hotmart webhook token
+  hotmartProductId String?  @map("hotmart_product_id") // optional product filter
+  // Support WhatsApp number (digits, country code) delivered to all clients via
+  // the validate response — paid-active customers are redirected here.
+  supportWhatsapp  String?  @map("support_whatsapp")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("server_settings")
+}

@@ -1,0 +1,479 @@
+// Wootrico v2 — data model
+// See plan: packages/db/prisma/schema.prisma is the core data model.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────── enums ───────────────────────────
+
+enum AdminRole {
+  owner
+  admin
+}
+
+enum ProviderType {
+  evolution
+  uazapi
+  zapi
+}
+
+enum ConversationStatus {
+  open
+  resolved
+  pending
+}
+
+enum IntegrationStatus {
+  unconfigured
+  ok
+  error
+}
+
+enum LicenseStatus {
+  unactivated
+  active
+  warning
+  blocked
+}
+
+enum MessageType {
+  text
+  image
+  audio
+  video
+  document
+}
+
+enum MediaDirection {
+  incoming
+  outgoing
+}
+
+enum DedupDirection {
+  phone_origin
+  api_origin
+}
+
+enum WebhookSource {
+  provider
+  chatwoot
+}
+
+// ─────────────────────────── auth ───────────────────────────
+
+model AdminUser {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  name         String?
+  passwordHash String?    @map("password_hash")
+  authProvider String     @default("password") @map("auth_provider")
+  googleSub    String?    @unique @map("google_sub")
+  role         AdminRole  @default(owner)
+  isActive     Boolean    @default(true) @map("is_active")
+  lastLoginAt  DateTime?  @map("last_login_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+  sessions     Session[]
+  auditLogs    AuditLog[]
+
+  @@map("admin_users")
+}
+
+model Session {
+  id               String    @id @default(uuid())
+  adminUserId      String    @map("admin_user_id")
+  adminUser        AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  refreshTokenHash String    @map("refresh_token_hash")
+  userAgent        String?   @map("user_agent")
+  ip               String?
+  expiresAt        DateTime  @map("expires_at")
+  revokedAt        DateTime? @map("revoked_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@index([adminUserId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ─────────────────────── integrations ───────────────────────
+
+model Integration {
+  id           String       @id @default(uuid())
+  name         String
+  isEnabled    Boolean      @default(true) @map("is_enabled")
+  webhookToken String       @unique @map("webhook_token")
+
+  // Chatwoot side
+  chatwootBaseUrl    String             @map("chatwoot_base_url")
+  chatwootApiToken   String             @map("chatwoot_api_token") // encrypted
+  chatwootAccountId  String             @map("chatwoot_account_id")
+  chatwootInboxName  String             @map("chatwoot_inbox_name")
+  chatwootInboxId    String?            @map("chatwoot_inbox_id")
+  conversationStatus ConversationStatus @default(open) @map("conversation_status")
+
+  // Behavioral flags
+  reabrirConversa    Boolean @default(true) @map("reabrir_conversa")
+  desconsiderarGrupo Boolean @default(true) @map("desconsiderar_grupo")
+  assinarMensagem    Boolean @default(true) @map("assinar_mensagem")
+  defaultCountry     String  @default("BR") @map("default_country")
+
+  // Provider
+  providerType ProviderType @map("provider_type")
+
+  status              IntegrationStatus @default(unconfigured)
+  lastTestChatwootAt  DateTime?         @map("last_test_chatwoot_at")
+  lastTestProviderAt  DateTime?         @map("last_test_provider_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  providerConfig  ProviderConfig?
+  messageMappings  MessageMapping[]
+  dedupTickets     DedupTicket[]
+  webhookEvents    WebhookEvent[]
+  mediaAssets      MediaAsset[]
+  messageLogs      MessageLog[]
+  conversations    Conversation[]
+
+  @@map("integrations")
+}
+
+// GLOBAL contact-identity directory (instance-wide, NOT per company/account).
+// WhatsApp is migrating from phone numbers (PN, `@s.whatsapp.net`) to a
+// privacy-preserving LID (`@lid`); the same person may arrive as a PN, a LID,
+// or both. We pair them onto one internal UUID shared across every integration,
+// so a number discovered by company A is also known to company B when only the
+// LID arrives there. Each company still replies using the JID it received and
+// keeps its own Chatwoot contacts/conversations — only this mapping is shared.
+// Nulls are distinct in Postgres, so the unique columns allow many null lid/pn.
+model ContactIdentity {
+  id  String  @id @default(uuid()) // canonical key, used as the Chatwoot identifier
+  lid String? @unique // LID number, without the @lid suffix
+  pn  String? @unique // phone number digits, without the @s.whatsapp.net suffix
+
+  pushName  String? @map("push_name")
+  avatarUrl String? @map("avatar_url") // last WhatsApp profile picture URL seen (for change detection)
+  // When set, the avatar BYTES are stored in ContactAvatar — the panel serves
+  // those (WhatsApp URLs expire). Also used to cache-bust the panel image.
+  avatarStoredAt DateTime? @map("avatar_stored_at")
+  avatar         ContactAvatar?
+
+  // Where this person has been observed. Not mutually exclusive: the same
+  // canonical identity can be seen both in a DM and as a group participant.
+  // Roster-only members (seeded from a group's participant list, never spoke)
+  // are seen_in_group=true with no push name/avatar until they send a message.
+  seenInDm    Boolean @default(false) @map("seen_in_dm")
+  seenInGroup Boolean @default(false) @map("seen_in_group")
+  // Name of the most recent group this contact was seen in — so the panel can
+  // signal WHICH group a group-origin contact came from (besides the person's
+  // own name). Null for DM-only contacts.
+  lastGroupName String? @map("last_group_name")
+
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  lastSeenAt DateTime? @map("last_seen_at")
+
+  @@map("contact_identities")
+}
+
+// Avatar bytes, stored so the panel can show contact photos reliably (WhatsApp
+// profile-picture URLs are temporary/signed and expire). Chatwoot keeps its own
+// uploaded copy; this is for the Wootrico panel. 1:1 with ContactIdentity.
+model ContactAvatar {
+  identityId  String          @id @map("identity_id")
+  identity    ContactIdentity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  contentType String          @map("content_type")
+  data        Bytes
+  updatedAt   DateTime        @updatedAt @map("updated_at")
+
+  @@map("contact_avatars")
+}
+
+model ProviderConfig {
+  id            String       @id @default(uuid())
+  integrationId String       @unique @map("integration_id")
+  integration   Integration  @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  providerType  ProviderType @map("provider_type")
+
+  // Encrypted JSON blob with provider-specific credentials.
+  config String
+
+  // Plaintext, indexed value used as a secondary routing safety-net
+  // (uazapi: phone number, zapi: instance, evolution: instance/base).
+  providerIdentifier String? @map("provider_identifier")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([providerType, providerIdentifier])
+  @@map("provider_configs")
+}
+
+// ─────────────────── durable engine state ───────────────────
+
+model MessageMapping {
+  id                    String      @id @default(uuid())
+  integrationId         String      @map("integration_id")
+  integration           Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  chatwootMessageId     String      @map("chatwoot_message_id")
+  providerMessageId     String      @map("provider_message_id")
+  chatwootConversationId String?    @map("chatwoot_conversation_id")
+  chatwootInboxId       String?     @map("chatwoot_inbox_id")
+  recipient             String?
+  // JID of the message author — used to render reply quotes (esp. in groups).
+  senderJid             String?     @map("sender_jid")
+  provider              ProviderType
+  createdAt             DateTime    @default(now()) @map("created_at")
+  expiresAt             DateTime    @map("expires_at")
+
+  @@unique([integrationId, chatwootMessageId])
+  @@unique([integrationId, providerMessageId])
+  @@index([expiresAt])
+  @@map("message_mappings")
+}
+
+// Media library — every image/audio/video/document that flows through a
+// provider (sent or received) is persisted here, one row PER OCCURRENCE. The
+// binary itself lives in the configured storage (local fs or S3); only the
+// `storageKey` points to it. The binary is deduplicated by `sha256` at the
+// storage layer (same file → same key, written once), but each send/receive is
+// still its own row so the library shows who/when/which-number for each event.
+// PII note: phone/jid/lid/senderName are stored in cleartext (search requires
+// it; consistent with ContactIdentity). All access is authenticated.
+model MediaAsset {
+  id                String         @id @default(uuid())
+  integrationId     String         @map("integration_id")
+  integration       Integration    @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  direction         MediaDirection
+  messageType       MessageType    @map("message_type")
+  mimeType          String         @map("mime_type")
+  fileName          String?        @map("file_name")
+  size              Int
+  sha256            String
+  storageDriver     String         @map("storage_driver") // 'local' | 's3'
+  storageKey        String         @map("storage_key")
+
+  // counterparty identifiers (the other side of the conversation)
+  phone      String?
+  jid        String?
+  lid        String?
+  senderName String? @map("sender_name")
+  isGroup    Boolean @default(false) @map("is_group")
+  groupId    String? @map("group_id")
+
+  providerType      ProviderType @map("provider_type")
+  providerMessageId String?      @map("provider_message_id")
+  caption           String?
+  sentAt            DateTime?    @map("sent_at")
+  createdAt         DateTime     @default(now()) @map("created_at")
+  // Set only when a retention period is configured; the cleanup sweep deletes
+  // the binary + row once past this. Null = keep indefinitely.
+  expiresAt         DateTime?    @map("expires_at")
+
+  @@index([integrationId, createdAt])
+  @@index([messageType])
+  @@index([direction])
+  @@index([phone])
+  @@index([jid])
+  @@index([expiresAt])
+  @@map("media_assets")
+}
+
+// Binary store for the "local" media driver. Kept in Postgres (which the panel
+// and worker already share) so the library works with no shared filesystem
+// volume between containers. Deduplicated by storageKey (which embeds the
+// sha256). For large media volumes, configure the S3 driver instead.
+model MediaBlob {
+  storageKey String   @id @map("storage_key")
+  data       Bytes
+  size       Int
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("media_blobs")
+}
+
+// Semantic, content-FREE log of each message the engine processed — written by
+// the worker after parsing (where the message type/media/reply is known). Unlike
+// WebhookEvent (recorded at raw receipt, before parsing), this carries the
+// message metadata the panel shows: direction, type, whether it had media, and
+// whether it was a reply/quote. Never any content. Short TTL.
+model MessageLog {
+  id            String         @id @default(uuid())
+  integrationId String         @map("integration_id")
+  integration   Integration    @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  provider      ProviderType
+  direction     MediaDirection // incoming | outgoing
+  messageType   MessageType    @map("message_type") // text | image | audio | video | document
+  kind          String // created | edited | deleted
+  hasMedia      Boolean        @map("has_media")
+  isReply       Boolean        @map("is_reply") // reply/quote of another message
+  isGroup       Boolean        @map("is_group")
+  providerMessageId String?    @map("provider_message_id")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  // Retention is driven by AppSettings.logRetentionDays (createdAt-based sweep);
+  // kept nullable for legacy rows and no longer populated on insert.
+  expiresAt     DateTime?      @map("expires_at")
+
+  @@index([integrationId, createdAt])
+  @@index([createdAt])
+  @@map("message_logs")
+}
+
+// Captured conversation, grouped by counterparty (contact/group) per integration
+// — `peerKey` is the canonical id, always available, so history is captured even
+// when the license is inactive (processing is gated, capture is not). The FULL
+// message text is stored; the panel only ever shows a truncated view and full
+// view/export require an active license. Retention via
+// AppSettings.conversationRetentionDays (default 90d), swept by lastMessageAt.
+model Conversation {
+  id            String                @id @default(uuid())
+  integrationId String                @map("integration_id")
+  integration   Integration           @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  peerKey       String                @map("peer_key") // canonical contact/group key
+  contactName   String?               @map("contact_name")
+  contactNumber String?               @map("contact_number") // counterparty phone/jid (null for groups)
+  isGroup       Boolean               @default(false) @map("is_group")
+  preview       String? // latest message start (~200 chars) — the list "gist"
+  startedAt     DateTime              @default(now()) @map("started_at")
+  lastMessageAt DateTime              @default(now()) @map("last_message_at")
+  messages      ConversationMessage[]
+
+  @@unique([integrationId, peerKey])
+  @@index([integrationId, lastMessageAt])
+  @@index([lastMessageAt])
+  @@map("conversations")
+}
+
+model ConversationMessage {
+  id                String         @id @default(uuid())
+  conversationId    String         @map("conversation_id")
+  conversation      Conversation   @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  at                DateTime       @default(now())
+  direction         MediaDirection
+  sender            String? // who sent it (esp. in groups)
+  messageType       MessageType    @map("message_type")
+  text              String // FULL message text (truncated only for display)
+  providerMessageId String?        @map("provider_message_id") // dedup re-deliveries
+
+  @@unique([conversationId, providerMessageId])
+  @@index([conversationId, at])
+  @@map("conversation_messages")
+}
+
+model DedupTicket {
+  id            String         @id @default(uuid())
+  integrationId String         @map("integration_id")
+  integration   Integration    @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  recipient     String
+  messageType   MessageType    @map("message_type")
+  direction     DedupDirection
+  consumedAt    DateTime?      @map("consumed_at")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  expiresAt     DateTime       @map("expires_at")
+
+  @@index([integrationId, recipient, messageType, direction, consumedAt])
+  @@index([expiresAt])
+  @@map("dedup_tickets")
+}
+
+// Content-free audit row. The raw payload NEVER lands here (LGPD): it travels
+// only inside the broker message and is dropped after processing. Only
+// non-PII metadata is kept, with a short TTL.
+model WebhookEvent {
+  id             String        @id @default(uuid())
+  integrationId  String?       @map("integration_id")
+  integration    Integration?  @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+  source         WebhookSource
+  webhookToken   String?       @map("webhook_token")
+  originDetected String?       @map("origin_detected")
+  eventType      String?       @map("event_type")
+  accepted       Boolean       @default(true)
+  reason         String?
+  receivedAt     DateTime      @default(now()) @map("received_at")
+  // Retention is driven by AppSettings.logRetentionDays (receivedAt-based sweep);
+  // kept nullable for legacy rows and no longer populated on insert.
+  expiresAt      DateTime?     @map("expires_at")
+
+  @@index([integrationId, receivedAt])
+  @@index([receivedAt])
+  @@map("webhook_events")
+}
+
+model AuditLog {
+  id          String     @id @default(uuid())
+  adminUserId String?    @map("admin_user_id")
+  adminUser   AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: SetNull)
+  action      String
+  entityType  String?    @map("entity_type")
+  entityId    String?    @map("entity_id")
+  metadata    Json?
+  ip          String?
+  createdAt   DateTime   @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ─────────────────────── single-row state ───────────────────────
+
+model LicenseState {
+  id              String        @id @default("singleton")
+  licenseKey      String?       @map("license_key") // encrypted
+  dataKey         String?       @map("data_key") // primary per-license secret (seal new data), encrypted
+  dataKeys        String?       @map("data_keys") // all historical secrets (JSON array), encrypted — for decrypt
+  instanceId      String?       @map("instance_id")
+  plan            String?       // 'trial' | 'paid' — mirrors the server's answer
+  expiresAt       DateTime?     @map("expires_at") // expiry mirrored from the server (trial and paid)
+  status          LicenseStatus @default(unactivated)
+  lastHeartbeatAt DateTime?     @map("last_heartbeat_at")
+  nextHeartbeatAt DateTime?     @map("next_heartbeat_at")
+  lastValidatedAt DateTime?     @map("last_validated_at") // last successful online check
+  heartbeatFailures Int         @default(0) @map("heartbeat_failures") // consecutive unreachable checks → backoff
+  features        Json?
+  // Global support WhatsApp number delivered by the license server on validate.
+  supportWhatsapp String?       @map("support_whatsapp")
+  lastError       String?       @map("last_error")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  @@map("license_state")
+}
+
+model AppSettings {
+  id               String   @id @default("singleton")
+  publicBaseUrl    String?  @map("public_base_url")
+  licenseServerUrl String?  @map("license_server_url")
+  setupCompleted   Boolean  @default(false) @map("setup_completed")
+  // Optional connection-string overrides (encrypted). When set, they take
+  // precedence over the env vars at boot. Applied on app/worker restart.
+  rabbitmqUrl        String?   @map("rabbitmq_url")
+  redisUrl           String?   @map("redis_url")
+  databaseUrl        String?   @map("database_url")
+  // Bumped by the panel's "restart" action; the worker polls this to self-exit
+  // (Swarm restart_policy brings both back, re-reading the overrides above).
+  restartRequestedAt DateTime? @map("restart_requested_at")
+
+  // Media library configuration.
+  mediaLibraryEnabled Boolean @default(true) @map("media_library_enabled")
+  mediaStorageDriver  String  @default("local") @map("media_storage_driver") // 'local' | 's3'
+  mediaRetentionDays  Int?    @map("media_retention_days") // null = keep forever
+  mediaS3Config       String? @map("media_s3_config") // encrypted JSON (S3 credentials)
+
+  // System-log retention. Drives the worker's createdAt-based sweep of
+  // message_logs / webhook_events / audit_logs. null = keep forever; default 14.
+  logRetentionDays    Int?    @default(14) @map("log_retention_days")
+  // Conversation-openers retention (createdAt-based sweep of conversation_logs).
+  // null = keep forever; default 90 days.
+  conversationRetentionDays Int? @default(90) @map("conversation_retention_days")
+
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("app_settings")
+}

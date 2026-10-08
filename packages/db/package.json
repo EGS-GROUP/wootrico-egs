@@ -1,0 +1,30 @@
+{
+  "name": "@wootrico/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./conn": "./src/conn.ts"
+  },
+  "scripts": {
+    "generate": "prisma generate",
+    "migrate": "prisma migrate deploy",
+    "migrate:dev": "prisma migrate dev",
+    "studio": "prisma studio",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "@wootrico/cache": "workspace:*",
+    "@wootrico/config": "workspace:*",
+    "@wootrico/queue": "workspace:*",
+    "prisma": "^5.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3"
+  }
+}

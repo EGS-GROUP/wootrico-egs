@@ -1,0 +1,24 @@
+WOOTRICO — PROMPT DE CAPA (comunidade)
+=======================================
+
+PROMPT (imagem)
+---------------
+A sophisticated, elegant, and corporate 3D digital infographic, isometric perspective, strictly avoiding cyborgs, robotic faces, or overly sci-fi aesthetics, set against a premium deep black to textured charcoal gradient background. The scene visualizes a self-hosted message integration hub that bridges multiple unofficial WhatsApp APIs into a single Chatwoot inbox. At the center sits a large, polished 3D emblem of two interlocking speech bubbles forming a smooth yin-yang swirl — one in glossy coral-red (#E2574C), the other in warm golden-amber (#F2C14E) — echoing the Wootrico logo, each bubble bearing a glowing circular sync-arrow badge to signal real-time two-way synchronization; this is the routing core, crafted in polished dark-metal with coral and amber edge-lighting. From the LEFT, a cluster of three sleek floating API provider nodes (compact dark-glass server cards representing unofficial WhatsApp APIs — Evolution Go, UAZAPI, Z-API) emit streams of small glowing WhatsApp-style chat bubbles that travel along elegant curved coral and amber pathways into the central hub, the source bubbles carrying a subtle green edge-accent. On the RIGHT, all streams converge into a sleek dark-glass Chatwoot agent inbox dashboard panel — a single unified conversation list with ordered message threads, contact avatars and an agent reply field, lit with a restrained cool-blue edge-accent — connected to the hub by bidirectional synchronization arrows. In the lower foreground, a small polished server / Docker container block with a protective shield conveys self-hosted, privacy-by-design on your own VPS. Floating dark-glass panels hover above the merge points showing simplified UI: a WhatsApp conversation, a Chatwoot reply, sync arrows and repository-style icons; glowing geometric nodes along the paths represent individual messages. Hovering in the foreground, the main text reads 'WOOTRICO' in a massive, bold, modern sans-serif typeface, rendered in a polished silver-metallic finish with subtle coral-red edge-lighting. Directly below it, the subtitle 'WHATSAPP NÃO-OFICIAL NO CHATWOOT · SELF-HOSTED' is rendered in a clean, glowing warm golden-amber, with a small 'VIBE STACK' community tag in coral-red beside it. Professional studio lighting highlights the premium matte black structures and the high-gloss coral and amber metallic finishes, emphasizing secure, centralized customer messaging, multi-provider routing and elegant integration architecture. Subtle floating chat-bubble icons, phone-number tags, @ handles, sync arrows and small inbox icons hover faintly in the dark background.
+
+
+NOTAS DE USO
+------------
+Paleta (da logo): coral-red #E2574C + amber-dourado #F2C14E, com prata polido /
+metal escuro sobre preto/carvao. Acentos verde (fontes WhatsApp) e azul (Chatwoot)
+entram SUTIS, so para sinalizar os dois ecossistemas — o heroi continua coral+ambar.
+
+Elementos (diferentes do exemplo de Git): hub central de roteamento, nos de API a
+esquerda, inbox unificado do Chatwoot a direita, fluxo de bolhas de conversa, setas
+de sync bidirecional, bloco self-hosted/Docker com escudo.
+
+
+VARIACOES DE TITULO (troque a linha do main text / subtitle)
+------------------------------------------------------------
+- Main 'WOOTRICO'            · sub 'INTEGRE WHATSAPP AO CHATWOOT'
+- Main 'WHATSAPP NO CHATWOOT' · sub 'WOOTRICO · SELF-HOSTED'
+- Main 'WOOTRICO'            · sub 'MULTIPLAS APIS DE WHATSAPP, UM SO ATENDIMENTO'

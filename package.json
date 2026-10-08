@@ -1,0 +1,28 @@
+{
+  "name": "wootrico-v2",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted middleware connecting Chatwoot to unofficial WhatsApp APIs (evolution-go, uazapi, zapi).",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@10.12.1",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter \"./apps/*\" run dev",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "pnpm -r run lint",
+    "db:generate": "pnpm --filter @wootrico/db run generate",
+    "db:migrate": "pnpm --filter @wootrico/db run migrate",
+    "db:studio": "pnpm --filter @wootrico/db run studio",
+    "dev:db": "docker compose -f docker-compose.dev.yml up -d",
+    "dev:db:down": "docker compose -f docker-compose.dev.yml down"
+  },
+  "devDependencies": {
+    "jose": "^5.9.6",
+    "typescript": "^5.6.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["@prisma/client", "@prisma/engines", "prisma", "argon2", "esbuild"]
+  }
+}

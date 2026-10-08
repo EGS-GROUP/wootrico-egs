@@ -1,0 +1,512 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  WOOTRICO v2 — instalação via Docker Compose (Coolify / Portainer / Dockge)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#  Para quem NÃO quer usar o instalador de terminal (install.sh).
+#  Este arquivo NÃO builda nada: baixa a imagem pública do Docker Hub
+#  (ericoautomacao/wootrico-v2) e sobe painel + worker + infra.
+#
+#  Cada linha abaixo está comentada: o que a tag faz e o que você troca.
+#  Procure pelos marcadores:
+#     ⚠️  = você PRECISA definir
+#     ►   = troque só se for usar infra própria (Postgres/Redis/Rabbit já seus)
+#     ⓘ   = explicação, não precisa mexer
+#     🚫  = não mexa, quebra
+#
+#  ─── ANTES DE SUBIR (5 minutos, fora daqui) ──────────────────────────────
+#   1. DNS: crie um registro **A** do seu domínio (ex.: wootrico.suaempresa.com)
+#      apontando para o **IP público do servidor**, e espere propagar.
+#      🚫 Sem isso o certificado TLS não é emitido: o Let's Encrypt precisa
+#         alcançar o domínio pelas portas 80 e 443.
+#   2. Portas **80** e **443** abertas no firewall do servidor/provedor.
+#   3. Tenha em mãos (detalhes no fim deste arquivo):
+#      • do **Chatwoot**: a URL, o ID da conta e um Access Token de admin;
+#      • do **provedor de WhatsApp** (Evolution Go / uazapi / Z-API): as
+#        credenciais da instância.
+#      ⓘ Nada disso vai neste arquivo — é preenchido no painel do Wootrico,
+#        depois que ele estiver no ar.
+#
+#  ─── COMO USAR NO COOLIFY ────────────────────────────────────────────────
+#   1. Coolify → Project → + New Resource → **Docker Compose (Empty)**
+#   2. Cole este arquivo inteiro no editor.
+#   3. Aba **Environment Variables**: o Coolify lista sozinho todas as
+#      variáveis ${...} usadas aqui. Preencha as marcadas com ⚠️.
+#   4. Aba **Domains** do serviço `app` → seu domínio e a porta **3000**.
+#      (o Coolify cuida do proxy + certificado TLS — não precisa de Traefik)
+#   5. **Deploy**. Abra https://SEU_DOMINIO → o setup wizard cria o admin
+#      e ativa a licença.
+#
+#  ─── FORA DO COOLIFY (Portainer / Dockge / docker compose puro) ──────────
+#   Crie um `.env` ao lado deste arquivo com as variáveis do bloco abaixo e:
+#      docker compose -f docker-compose.coolify.yml up -d
+#   Descomente o bloco `ports:` do serviço `app`, ou as labels de Traefik se
+#   você já roda um Traefik próprio.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+#  ⚠️ AS 5 VARIÁVEIS OBRIGATÓRIAS
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#   POSTGRES_PASSWORD   senha do banco (invente uma forte, só é usada internamente)
+#   RABBITMQ_PASSWORD   senha do broker (idem)
+#   PUBLIC_BASE_URL     URL pública COM https, SEM barra no final.
+#                       Ex.: https://wootrico.suaempresa.com
+#                       ↳ é ela que monta as URLs de webhook entregues ao
+#                         Chatwoot e ao provedor de WhatsApp. Errou aqui, as
+#                         mensagens não chegam.
+#   JWT_SECRET          segredo de sessão, mínimo 32 caracteres.
+#   APP_ENCRYPTION_KEY  32 bytes em base64 (criptografa as credenciais salvas).
+#
+#  Como gerar os dois segredos (em qualquer máquina com Linux/Mac, ou no
+#  terminal do próprio painel):
+#
+#     openssl rand -base64 48    →  JWT_SECRET
+#     openssl rand -base64 32    →  APP_ENCRYPTION_KEY   (tem que ser 32 bytes!)
+#
+#  💡 O APP_ENCRYPTION_KEY tem que decodificar para EXATAMENTE 32 bytes.
+#     Não invente uma string à mão — o app se recusa a subir.
+#     Guarde-o: trocá-lo depois invalida todas as credenciais já salvas.
+#
+#  ⓘ OPCIONAL — têm valor padrão, só mexa se precisar:
+#
+#   POSTGRES_USER          (padrão: wootrico)
+#   POSTGRES_DB            (padrão: wootrico)
+#   RABBITMQ_USER          (padrão: wootrico)
+#   RABBITMQ_VHOST         (padrão: /   — veja a nota no serviço rabbitmq)
+#   RABBITMQ_VHOST_URL     (padrão: %2F — a MESMA coisa, codificada para URL)
+#   RABBITMQ_MEMORY_LIMIT  (padrão: 1g  — veja a nota no serviço rabbitmq)
+#   LOG_LEVEL              (padrão: info | use `debug` para investigar problemas)
+#   WOOTRICO_IMAGE         (padrão: ericoautomacao/wootrico-v2:latest)
+#
+#  🚫 NÃO defina LICENSE_SERVER_URL em lugar nenhum.
+#     A URL do servidor de licença já vem embutida na imagem. Se você declarar
+#     essa variável, ela SOBRESCREVE o valor correto e derruba a licença. É
+#     por isso que este compose usa `environment:` em vez de `env_file: .env`
+#     (um `.env` herdado de outra instalação arrastaria a variável junto).
+#
+# ═══════════════════════════════════════════════════════════════════════════
+
+# `services:` — a lista de containers da stack. São 5: três de infra
+# (postgres, rabbitmq, redis) e dois do Wootrico (app, worker).
+services:
+  # ─────────────────────────────────────────────────────────────────────────
+  #  POSTGRES — banco de dados. Guarda contas, integrações e o histórico.
+  # ─────────────────────────────────────────────────────────────────────────
+  #  ► JÁ TEM UM POSTGRES? (o do Chatwoot, ou um Postgres do próprio Coolify)
+  #    1. Comente/apague este serviço inteiro;
+  #    2. Apague o volume `pgdata` lá no fim do arquivo;
+  #    3. Apague as linhas `postgres: { condition: ... }` de `app` e `worker`;
+  #    4. Troque o `DATABASE_URL` nos DOIS serviços (app e worker).
+  #    ⚠️ O database (`wootrico`) precisa EXISTIR antes. O Wootrico cria as
+  #       TABELAS sozinho na primeira subida, mas não cria o database.
+  #       Rode antes, no seu Postgres:   CREATE DATABASE wootrico;
+  # ─────────────────────────────────────────────────────────────────────────
+  postgres:
+    # `image:` — qual imagem baixar. 16-alpine é a versão testada; alpine é a
+    # variante enxuta. Não troque a versão maior (16 → 17) sem migrar o dado.
+    image: postgres:16-alpine
+
+    # `restart:` — política de reinício. `unless-stopped` sobe de novo se o
+    # container cair ou o servidor reiniciar, mas respeita você parando à mão.
+    restart: unless-stopped
+
+    # `environment:` — variáveis lidas pelo container do Postgres no primeiro
+    # boot para criar o usuário e o banco.
+    # ⓘ A sintaxe ${NOME:-valor} significa "use a variável NOME; se ela estiver
+    #   vazia, use `valor`". Sem o `:-` (como na senha abaixo) não há padrão:
+    #   é obrigatória.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wootrico}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}   # ⚠️ OBRIGATÓRIO
+      POSTGRES_DB: ${POSTGRES_DB:-wootrico}
+
+    # `volumes:` — onde o dado sobrevive ao container. `pgdata` é um volume
+    # nomeado (declarado no fim do arquivo); o container é descartável, o
+    # volume não. 🚫 Apagar isto apaga o banco.
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+    # `ports:` — publica a porta no host. ⓘ O banco NÃO precisa ficar exposto:
+    # só `app` e `worker` falam com ele, pela rede interna. Descomente apenas
+    # se for acessar de fora (DBeaver, pgAdmin) — e saiba que isso expõe o
+    # banco à internet se o firewall da VPS estiver aberto.
+    # ports:
+    #   - '5433:5432'   # portaNoHost:portaNoContainer
+
+    # `healthcheck:` — como o Docker sabe que o banco está PRONTO (não só
+    # "ligado"). É o que segura o `app` até o Postgres aceitar conexão.
+    #   test     = comando rodado dentro do container
+    #   interval = de quanto em quanto tempo testa
+    #   timeout  = quanto espera cada teste responder
+    #   retries  = quantas falhas seguidas até marcar "unhealthy"
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-wootrico} -d ${POSTGRES_DB:-wootrico}']
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  # ─────────────────────────────────────────────────────────────────────────
+  #  RABBITMQ — a fila. Todo webhook entra aqui antes de ser processado.
+  #  É ela que segura o tranco quando chega muita mensagem de uma vez.
+  # ─────────────────────────────────────────────────────────────────────────
+  #  ► JÁ TEM UM RABBITMQ? Comente este serviço, apague o volume
+  #    `rabbitmq_data`, apague as linhas `rabbitmq: { condition: ... }` de
+  #    `app`/`worker` e troque o `RABBITMQ_URL` nos dois.
+  #    ⓘ A topologia (exchanges, filas, bindings) é criada sozinha no boot do
+  #      app — você não precisa preparar nada no broker.
+  # ─────────────────────────────────────────────────────────────────────────
+  rabbitmq:
+    # A tag `-management` inclui o painel web do RabbitMQ (porta 15672).
+    image: rabbitmq:3-management-alpine
+    restart: unless-stopped
+
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-wootrico}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}   # ⚠️ OBRIGATÓRIO
+
+      # `RABBITMQ_DEFAULT_VHOST` — o "vhost" é uma divisória interna do broker,
+      # como um schema no banco. O padrão `/` serve para 99% dos casos.
+      # ⚠️ Se você trocar aqui, tem que trocar TAMBÉM o RABBITMQ_VHOST_URL
+      #    usado no RABBITMQ_URL de `app` e `worker` — lá o valor vai dentro de
+      #    uma URL e precisa estar codificado:
+      #       vhost `/`         →  na URL vira  %2F
+      #       vhost `wootrico`  →  na URL vira  wootrico  (sem barra, sem encode)
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
+
+      # Porta AMQP dentro do container. Fixada de propósito: é a que aparece
+      # no RABBITMQ_URL logo abaixo. 🚫 Mudar aqui sem mudar lá quebra a fila.
+      RABBITMQ_NODE_PORT: '5672'
+
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+    # ⓘ Painel de administração do RabbitMQ (usuário/senha = os de cima).
+    # Útil para ver filas empilhando. Deixe comentado em produção: é mais uma
+    # porta aberta na internet.
+    # ports:
+    #   - '15673:15672'
+
+    # `mem_limit:` — ⚠️ TETO DE MEMÓRIA. Não remova.
+    #   Sem limite de container, o RabbitMQ calcula o alarme de memória sobre a
+    #   RAM TOTAL do host e pode consumir ~40% da máquina inteira antes de
+    #   alarmar. Numa VPS que também roda Chatwoot, isso derruba tudo — e um
+    #   broker bloqueado é exatamente o que trava o processamento de webhooks.
+    #   Com o limite, o alarme passa a ser 40% DESTE valor (~410M para 1g).
+    #   ► VPS de 2 GB? Baixe para 512m.  VPS de 8 GB+? Pode subir para 2g.
+    # 🚫 E NÃO adicione a env var RABBITMQ_VM_MEMORY_HIGH_WATERMARK: ela está
+    #    descontinuada desde o RabbitMQ 3.9 e a imagem SE RECUSA A SUBIR com
+    #    ela definida.
+    mem_limit: ${RABBITMQ_MEMORY_LIMIT:-1g}
+
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 10s
+      timeout: 10s
+      retries: 24
+
+  # ─────────────────────────────────────────────────────────────────────────
+  #  REDIS — trava por conversa, cache e controle de ritmo (throttle).
+  #  É o que impede duas mensagens da mesma conversa de serem processadas ao
+  #  mesmo tempo e sairem fora de ordem.
+  # ─────────────────────────────────────────────────────────────────────────
+  #  ► JÁ TEM UM REDIS? Comente este serviço, apague o volume `redis_data`,
+  #    apague as linhas `redis: { condition: ... }` e troque o `REDIS_URL`.
+  #    ⚠️ NÃO compartilhe o mesmo índice do Chatwoot. Use outro número de DB
+  #      (redis://host:6379/3) ou uma instância separada — senão as chaves de
+  #      um sobrescrevem as do outro.
+  # ─────────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+    # `command:` — substitui o comando padrão da imagem.
+    #   --save 60 1     grava em disco se houve ao menos 1 alteração em 60s
+    #   --appendonly no dispensa o log de append (aqui o dado é descartável:
+    #                   são locks e cache, não a fonte da verdade)
+    command: ['redis-server', '--save', '60', '1', '--appendonly', 'no']
+
+    volumes:
+      - redis_data:/data
+
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  # ─────────────────────────────────────────────────────────────────────────
+  #  APP — painel web + API + recepção dos webhooks.
+  #  É ESTE que ganha o domínio. Os outros quatro ficam só na rede interna.
+  # ─────────────────────────────────────────────────────────────────────────
+  app:
+    # ► Para travar a versão em vez de seguir a `:latest`, defina
+    #   WOOTRICO_IMAGE=ericoautomacao/wootrico-v2:0.2.2
+    image: ${WOOTRICO_IMAGE:-ericoautomacao/wootrico-v2:latest}
+    restart: unless-stopped
+
+    # `command:` — 🚫 não altere. Roda as migrações do banco (cria/atualiza as
+    # tabelas, e é seguro rodar repetidamente) e só então sobe a API.
+    command: >-
+      sh -c "pnpm --filter @wootrico/db exec prisma migrate deploy &&
+             node apps/panel-api/dist/server.cjs"
+
+    environment:
+      # ── BANCO ────────────────────────────────────────────────────────────
+      # Formato: postgresql://USUARIO:SENHA@HOST:PORTA/BANCO?schema=public
+      #   HOST = `postgres` → é o NOME DO SERVIÇO aqui do compose. Dentro da
+      #          rede, o nome do serviço funciona como endereço. Não é preciso
+      #          IP nem porta publicada.
+      # ► POSTGRES EXTERNO: troque a linha inteira. Ex.:
+      #     DATABASE_URL: postgresql://wootrico:senha@10.0.0.5:5432/wootrico?schema=public
+      # ⚠️ Caractere especial na senha precisa ser codificado DENTRO da URL:
+      #     @ → %40      : → %3A      / → %2F      # → %23      ? → %3F
+      #    (mais simples: gere senhas só com letras e números)
+      DATABASE_URL: postgresql://${POSTGRES_USER:-wootrico}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-wootrico}?schema=public
+
+      # ── FILA ─────────────────────────────────────────────────────────────
+      # Formato: amqp://USUARIO:SENHA@HOST:PORTA/VHOST
+      #   O vhost vai no FIM, codificado: o padrão `/` se escreve `%2F`.
+      #   Se você mudou o RABBITMQ_DEFAULT_VHOST lá em cima, mude aqui também
+      #   (defina RABBITMQ_VHOST_URL com o mesmo valor, já codificado).
+      # ► RABBITMQ EXTERNO ou gerenciado (CloudAMQP etc.): troque a linha
+      #   inteira. Em serviços gerenciados o vhost costuma ter nome próprio:
+      #     RABBITMQ_URL: amqp://user:senha@rabbit.interno:5672/wootrico
+      # ⚠️ Mesma regra de codificação da senha.
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wootrico}:${RABBITMQ_PASSWORD}@rabbitmq:5672/${RABBITMQ_VHOST_URL:-%2F}
+
+      # ── REDIS ────────────────────────────────────────────────────────────
+      # ► REDIS EXTERNO COM SENHA:  redis://:SENHA@host:6379
+      #   (repare nos dois-pontos antes da senha — o Redis não tem usuário)
+      # ► REDIS EXTERNO SEM SENHA:  redis://host:6379
+      # ► OUTRO ÍNDICE, para não colidir com o Chatwoot:  redis://host:6379/3
+      REDIS_URL: redis://redis:6379
+
+      # ── URL PÚBLICA ⚠️ OBRIGATÓRIO ───────────────────────────────────────
+      # Exatamente o domínio configurado no proxy/Coolify, com https:// e SEM
+      # barra no final:   https://wootrico.suaempresa.com
+      # É daqui que saem as URLs de webhook entregues ao Chatwoot e ao provedor
+      # de WhatsApp. Se estiver errada, as mensagens não chegam — e o erro não
+      # aparece no painel, aparece só na ausência de mensagem.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+
+      # ── SEGREDOS ⚠️ OBRIGATÓRIOS ─────────────────────────────────────────
+      # JWT_SECRET:         mínimo 32 caracteres   → openssl rand -base64 48
+      # APP_ENCRYPTION_KEY: 32 bytes em base64     → openssl rand -base64 32
+      # Guarde os dois. Trocar o APP_ENCRYPTION_KEY invalida tudo que já foi
+      # salvo criptografado: tokens do Chatwoot, credenciais dos provedores,
+      # a chave da licença. Não há como recuperar — só recadastrar.
+      JWT_SECRET: ${JWT_SECRET}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY}
+
+      # ── RUNTIME ⓘ raramente muda ─────────────────────────────────────────
+      NODE_ENV: production   # 🚫 sempre `production` em servidor
+      PORT: '3000'           # porta DENTRO do container (é a que o proxy chama)
+      HOST: 0.0.0.0          # 🚫 escuta em todas as interfaces do container;
+                             #    com 127.0.0.1 o proxy não alcançaria o app
+      LOG_LEVEL: ${LOG_LEVEL:-info}   # ► use `debug` para investigar problemas
+
+      # 🚫 NÃO adicione LICENSE_SERVER_URL — já vem embutida na imagem;
+      #    declarar aqui sobrescreve o valor correto e derruba a licença.
+
+    # `expose:` — anuncia a porta 3000 para os outros containers e para o
+    # proxy, SEM abrir nada no host. É o suficiente no Coolify.
+    expose:
+      - '3000'
+
+    # `ports:` — publica a porta no host (acessível pelo IP da VPS).
+    # ⓘ NO COOLIFY deixe comentado: o proxy dele fala direto com a porta 3000
+    #   do container; basta preencher a aba **Domains**.
+    # ► Descomente para Portainer/Dockge/compose puro sem proxy, ou para pôr um
+    #   Nginx/Traefik seu na frente apontando para esta porta do host.
+    # ports:
+    #   - '8789:3000'   # portaNoHost:portaNoContainer
+
+    # `labels:` — ⓘ só para quem JÁ RODA UM TRAEFIK PRÓPRIO (não é o caso do
+    # Coolify, que gera as labels sozinho — deixar as duas coisas ligadas cria
+    # rota duplicada). Descomente o bloco, troque `seu.dominio.com.br` e
+    # confira o nome do seu certresolver.
+    # ⚠️ O Traefik precisa enxergar este container: ele tem que estar na MESMA
+    #   rede que o Traefik (veja o bloco `networks` no fim do arquivo).
+    # labels:
+    #   - traefik.enable=true                                                    # expõe este container ao Traefik
+    #   - traefik.http.routers.wootrico.rule=Host(`seu.dominio.com.br`)          # ⚠️ TROQUE pelo seu domínio
+    #   - traefik.http.routers.wootrico.entrypoints=websecure                    # entrypoint HTTPS (nome padrão)
+    #   - traefik.http.routers.wootrico.tls=true                                 # liga o TLS nesta rota
+    #   - traefik.http.routers.wootrico.tls.certresolver=letsencryptresolver     # ⚠️ nome do resolver no SEU Traefik
+    #   - traefik.http.routers.wootrico.service=wootrico                         # amarra a rota ao serviço abaixo
+    #   - traefik.http.services.wootrico.loadbalancer.server.port=3000           # porta interna do app
+    #   - traefik.http.services.wootrico.loadbalancer.passHostHeader=true        # 🚫 mantenha true: sem o Host
+    #                                                                            #    original, as URLs de webhook
+    #                                                                            #    saem erradas
+
+    # `depends_on:` — ordem de subida. Com `service_healthy` o app só começa
+    # depois que o healthcheck de cada dependência passou — não basta o
+    # container estar "up". É o que evita o app tentar migrar um banco que
+    # ainda está inicializando.
+    # ► Usa infra externa? Apague daqui a linha do serviço que você removeu.
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+    # Healthcheck do próprio app: bate no endpoint /api/health de dentro do
+    # container. É o que faz o painel mostrar "healthy" de verdade, e o que o
+    # `worker` espera antes de subir.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 10s
+      # `start_period` — carência inicial: falhas aqui não contam. A PRIMEIRA
+      # subida roda todas as migrações do banco e demora bem mais que as
+      # seguintes. Sem essa folga o container seria marcado unhealthy e
+      # reiniciado no meio da migração.
+      start_period: 90s
+      retries: 10
+
+  # ─────────────────────────────────────────────────────────────────────────
+  #  WORKER — processa a fila: entrega no Chatwoot e no WhatsApp.
+  #  Não tem domínio, não é acessado de fora. Mas sem ele NADA é processado:
+  #  as mensagens entram na fila e ficam paradas.
+  # ─────────────────────────────────────────────────────────────────────────
+  #  ⚠️ As variáveis abaixo têm que ser IGUAIS às do `app`. Se você mudou
+  #    DATABASE_URL / RABBITMQ_URL / REDIS_URL lá em cima, mude aqui também.
+  # ─────────────────────────────────────────────────────────────────────────
+  worker:
+    image: ${WOOTRICO_IMAGE:-ericoautomacao/wootrico-v2:latest}
+    restart: unless-stopped
+
+    # ⓘ Aqui NÃO roda `prisma migrate deploy`: o `depends_on` abaixo já espera
+    # o `app` ficar healthy, e o app só fica healthy depois de migrar. Um
+    # migrate a mais aqui não quebraria nada (o Prisma toma um lock no
+    # Postgres), mas atrasaria a subida à toa.
+    command: node apps/worker/dist/main.cjs
+
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-wootrico}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-wootrico}?schema=public
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wootrico}:${RABBITMQ_PASSWORD}@rabbitmq:5672/${RABBITMQ_VHOST_URL:-%2F}
+      REDIS_URL: redis://redis:6379
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY}
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # 🚫 idem: nada de LICENSE_SERVER_URL aqui.
+
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      # Espera o app terminar as migrações antes de conectar no banco.
+      app: { condition: service_healthy }
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  REDE
+# ═══════════════════════════════════════════════════════════════════════════
+#  ⓘ Por padrão NÃO declaramos rede nenhuma, e é de propósito: o Docker
+#    Compose (e o Coolify) criam sozinhos uma rede isolada para esta stack, na
+#    qual todos os serviços acima se enxergam pelo nome — `postgres`,
+#    `rabbitmq`, `redis`, `app`. No Coolify é assim que o proxy alcança o
+#    `app`. Não mexa sem motivo.
+#
+#  ► PRECISA FALAR COM UM CONTAINER DE FORA — o Postgres de outra stack, o
+#    Chatwoot, ou um Traefik próprio? Aí sim declare uma rede externa:
+#
+#    1. Descubra o nome real da rede:   docker network ls
+#    2. Descomente o bloco abaixo e troque `nome-da-rede-existente`.
+#    3. Adicione `networks: [default, externa]` nos serviços que precisam
+#       alcançá-la (normalmente `app` e `worker`; se usar as labels de Traefik,
+#       o `app` PRECISA estar na rede do Traefik).
+#
+#    ⚠️ `external: true` significa "esta rede já existe, não crie". Se o nome
+#      estiver errado, o deploy falha dizendo que a rede não foi encontrada —
+#      é um erro barulhento, não silencioso. Melhor assim.
+#
+# networks:
+#   externa:
+#     external: true
+#     name: nome-da-rede-existente
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  VOLUMES — onde o dado persiste entre reinícios e atualizações.
+#  🚫 Apagar isto APAGA O BANCO. Numa atualização de versão, os volumes ficam.
+#  ► Se você usa Postgres/RabbitMQ/Redis externos, remova aqui as linhas dos
+#    serviços que você comentou lá em cima.
+# ═══════════════════════════════════════════════════════════════════════════
+volumes:
+  pgdata:         # dados do Postgres — o que importa de verdade
+  rabbitmq_data:  # estado da fila (mensagens ainda não processadas)
+  redis_data:     # locks e cache — reconstruído sozinho se sumir
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  DEPOIS DO DEPLOY — o que configurar nos outros aplicativos
+# ═══════════════════════════════════════════════════════════════════════════
+#  Nada abaixo se configura NESTE arquivo. É tudo no painel do Wootrico
+#  (https://SEU_DOMINIO), depois que a stack subir.
+#
+#  ─── 1. Primeiro acesso ──────────────────────────────────────────────────
+#   Abra https://SEU_DOMINIO. O setup wizard pede:
+#     • nome e e-mail do administrador (a senha você define ali);
+#     • a chave da licença — a ativação é online e obrigatória: sem licença
+#       ativa o Wootrico não processa mensagens nem cria integrações.
+#
+#  ─── 2. No CHATWOOT (antes de criar a integração) ────────────────────────
+#   Você vai precisar de três coisas:
+#
+#     a) URL do Chatwoot — ex.: https://chat.suaempresa.com
+#        (a mesma que você usa no navegador, sem barra no final)
+#
+#     b) ID da conta (Account ID) — o número que aparece na própria URL do
+#        Chatwoot quando você está logado:
+#           https://chat.suaempresa.com/app/accounts/**1**/dashboard
+#                                                     ↑ este número
+#
+#     c) Access Token — no Chatwoot: foto do perfil (canto inferior esquerdo)
+#        → **Configurações do perfil** → role até **Token de acesso** → copiar.
+#        ⚠️ Use o token de um usuário **Administrador** da conta. Com token de
+#          agente comum o Wootrico não consegue criar a inbox, e a integração
+#          para no meio com erro de permissão.
+#
+#   ⓘ A INBOX você NÃO precisa criar à mão. Ao salvar a integração, o Wootrico
+#     cria uma inbox do tipo **API** com o nome que você escolher e já aponta o
+#     webhook dela para si mesmo. Se já existir uma inbox com aquele nome:
+#       • sendo canal API → ele só atualiza a URL do webhook;
+#       • sendo outro canal (WhatsApp oficial, site, etc.) → ele avisa, e aí
+#         sim você cola a "URL do Chatwoot" à mão no webhook daquela inbox.
+#
+#  ─── 3. NO PROVEDOR DE WHATSAPP ──────────────────────────────────────────
+#   O painel do Wootrico mostra, ao salvar a integração, duas URLs:
+#
+#     URL do Provedor:  https://SEU_DOMINIO/webhook/<token>/provider
+#     URL do Chatwoot:  https://SEU_DOMINIO/webhook/<token>/chatwoot
+#
+#   A do Chatwoot ele configura sozinho (item 2). A **URL do Provedor** é a
+#   única que você cola à mão, no painel do seu provedor:
+#
+#     • **Evolution Go** — abra a configuração de Webhook da instância, cole a
+#       URL do Provedor e habilite o evento **MESSAGES_UPSERT**.
+#       Credenciais pedidas no Wootrico: URL da API + API Key.
+#
+#     • **uazapi** — abra o Webhook da instância e cole a URL do Provedor,
+#       mantendo ativos os eventos de mensagens.
+#       Credenciais pedidas no Wootrico: URL da API + token + o número do
+#       WhatsApp da instância.
+#
+#     • **Z-API** — vá em **Webhooks → "Ao receber" (on-message-received)**,
+#       cole a URL do Provedor e salve.
+#       Credenciais pedidas no Wootrico: ID da instância + token + Client-Token.
+#
+#   ⚠️ Essas URLs saem do PUBLIC_BASE_URL que você definiu lá em cima. Se ele
+#     estiver errado (http em vez de https, domínio diferente do que está no
+#     proxy, barra no final), as URLs saem erradas e as mensagens simplesmente
+#     não chegam — sem erro visível no painel. É o engano mais comum.
+#
+#  ─── 4. Conferir se está funcionando ─────────────────────────────────────
+#   No painel, a integração tem **teste de conexão** para os dois lados
+#   (Chatwoot e provedor). Depois mande uma mensagem de um WhatsApp qualquer
+#   para o número conectado: ela deve aparecer na inbox do Chatwoot. Se não
+#   aparecer, veja **Logs** no painel — é lá que fica o motivo.
+# ═══════════════════════════════════════════════════════════════════════════
