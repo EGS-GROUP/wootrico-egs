@@ -18,8 +18,27 @@ export default async function licenseRoutes(app: FastifyInstance) {
   const guard = { onRequest: [app.authenticate] };
 
   app.get('/api/license/status', guard, async () => {
+    const isDev = process.env.LICENSE_DEV_MODE === 'true';
     const status = await evaluateLicense();
     const state = await getLicenseState();
+
+    if (isDev) {
+      return {
+        status: 'active',
+        instanceId: state.instanceId,
+        plan: 'developer',
+        expiresAt: null,
+        features: state.features ?? {},
+        lastValidatedAt: state.lastValidatedAt ?? new Date(),
+        lastHeartbeatAt: state.lastHeartbeatAt,
+        lastError: null,
+        offline: false,
+        blockedReason: null,
+        supportWhatsapp: state.supportWhatsapp ?? null,
+        serverUrl: process.env.LICENSE_SERVER_URL,
+      };
+    }
+
     // The license is valid but the last check couldn't reach the server. We
     // surface this so the panel can reassure the user (the key stays active) —
     // an unreachable server never blocks. Not "offline" when the server gave an

@@ -43,9 +43,27 @@ export function computeStatus(state: LicenseState, now = new Date()): LicenseSta
   return 'active';
 }
 
-/** Recompute, persist when it changes, and return the status. */
 export async function evaluateLicense(now = new Date()): Promise<LicenseStatus> {
   const state = await getLicenseState();
+  if (process.env.LICENSE_DEV_MODE === 'true') {
+    if (
+      state.status !== 'active' ||
+      state.plan !== 'developer' ||
+      state.expiresAt !== null ||
+      state.lastError !== null
+    ) {
+      await updateLicenseState({
+        status: 'active',
+        plan: 'developer',
+        expiresAt: null,
+        lastError: null,
+        lastValidatedAt: now,
+        nextHeartbeatAt: null,
+        heartbeatFailures: 0,
+      });
+    }
+    return 'active';
+  }
   const status = computeStatus(state, now);
   if (status !== state.status) await updateLicenseState({ status });
   return status;

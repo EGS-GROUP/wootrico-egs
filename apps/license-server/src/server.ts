@@ -771,7 +771,7 @@ function verifyStandardWebhook(opts: {
   const sigHeaderStr = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
 
   // Timestamp tolerance (default 5 minutes / 300s)
-  const ts = parseInt(tsStr, 10);
+  const ts = tsStr ? parseInt(tsStr, 10) : NaN;
   if (isNaN(ts)) return false;
   const nowSec = Math.floor(Date.now() / 1000);
   const tolerance = opts.toleranceSeconds ?? 300;
@@ -783,11 +783,13 @@ function verifyStandardWebhook(opts: {
   const secretBytes = getStandardWebhookSecretBytes(opts.secret);
   const expectedSig = createHmac('sha256', secretBytes).update(toSign).digest('base64');
 
-  const signatures = sigHeaderStr.split(/\s+/).flatMap((s) => s.split(','));
+  const signatures = sigHeaderStr ? sigHeaderStr.split(/\s+/).flatMap((s) => s.split(',')) : [];
   for (let i = 0; i < signatures.length; i++) {
-    const part = signatures[i].trim();
+    const part = signatures[i]?.trim();
+    if (!part) continue;
     if (part === 'v1' && i + 1 < signatures.length) {
-      const sig = signatures[i + 1].trim();
+      const sig = signatures[i + 1]?.trim();
+      if (!sig) continue;
       try {
         const a = Buffer.from(sig, 'base64');
         const b = Buffer.from(expectedSig, 'base64');
@@ -895,7 +897,7 @@ function extractIntentIdFromText(text: string | null | undefined): string | null
   if (!text || typeof text !== 'string') return null;
   const trimmed = text.trim();
   const match = trimmed.match(/sck[=:\s]+([a-zA-Z0-9_-]+)/i);
-  if (match) return match[1];
+  if (match && match[1]) return match[1];
   if (/^[a-zA-Z0-9_-]{15,45}$/.test(trimmed)) return trimmed;
   return null;
 }
