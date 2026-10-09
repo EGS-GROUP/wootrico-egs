@@ -344,7 +344,11 @@ export default function Dashboard() {
               {license?.status === 'active' || license?.status === 'warning'
                 ? license?.plan === 'paid'
                   ? 'definitiva'
-                  : 'ativa'
+                  : license?.plan === 'community'
+                    ? 'community'
+                    : license?.plan === 'developer'
+                      ? 'developer'
+                      : 'ativa'
                 : license?.status === 'blocked'
                   ? 'inativa'
                   : 'não ativada'}

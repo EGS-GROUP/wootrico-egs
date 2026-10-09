@@ -24,8 +24,8 @@ export type LicenseStatus = (typeof LICENSE_STATUSES)[number];
 
 // 'trial' = free time-limited key (auto-issued at signup, expires after the
 // trial window); 'paid' = bought/granted key with an expiry (default 1 year,
-// renewable). Neither plan is ever lifetime — every key always has an expiry.
-export const LICENSE_PLANS = ['trial', 'paid'] as const;
+// renewable); 'community' / 'developer' = open-source / dev / testing keys without time limit.
+export const LICENSE_PLANS = ['trial', 'paid', 'community', 'developer'] as const;
 export type LicensePlan = (typeof LICENSE_PLANS)[number];
 
 /** RabbitMQ topology names. */

@@ -13,7 +13,7 @@ export interface SystemInfo {
     required?: boolean;
     instanceId?: string | null;
     serverUrl?: string | null;
-    plan?: 'trial' | 'paid' | null;
+    plan?: 'trial' | 'paid' | 'community' | 'developer' | null;
     expiresAt?: string | null;
     lastValidatedAt?: string | null;
     lastHeartbeatAt?: string | null;

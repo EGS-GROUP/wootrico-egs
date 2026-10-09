@@ -235,6 +235,16 @@ export default function License() {
               </p>
             </div>
           )}
+          {isActive && remaining === null && (
+            <div className="mb-5 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
+              <p className="text-xl font-semibold text-white">
+                Licença Perpétua
+              </p>
+              <p className="text-xs text-neutral-400 mt-0.5">
+                {info?.plan === 'community' ? 'Plano Community (Open Source)' : info?.plan === 'developer' ? 'Ambiente de Desenvolvimento / QA' : 'Vigência ilimitada ativa'}
+              </p>
+            </div>
+          )}
 
           {/* Aviso: servidor de licenças indisponível — a licença CONTINUA ativa. */}
           {!isBlocked && info.offline && (

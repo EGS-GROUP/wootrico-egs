@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { pino, multistream } from 'pino';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { cfg } from './env.js';
 import { prisma } from './db.js';
@@ -25,15 +26,17 @@ const logger = pino(
 
 const app = Fastify({ loggerInstance: logger as never, trustProxy: true });
 
-// Tolerate bodyless POSTs (e.g. /admin/keys/:id/revoke) and empty JSON bodies.
+// Tolerate bodyless POSTs (e.g. /admin/keys/:id/revoke) and empty JSON bodies,
+// while preserving rawBody for webhook HMAC verification (Standard Webhooks / iDempiere).
 const jsonParser = (
-  _req: unknown,
+  req: FastifyRequest,
   payload: NodeJS.ReadableStream,
   done: (e: Error | null, body?: unknown) => void,
 ) => {
   let data = '';
   payload.on('data', (c) => (data += c));
   payload.on('end', () => {
+    (req as any).rawBody = data;
     try {
       done(null, data ? JSON.parse(data) : {});
     } catch {
@@ -81,8 +84,11 @@ type KeyLike = { revokedAt: Date | null; plan: string; expiresAt: Date | null };
 /** Whether a license key is currently valid, and if not, why. Online source of truth. */
 function keyStatus(lk: KeyLike, now: Date): { active: boolean; reason: string | null } {
   if (lk.revokedAt) return { active: false, reason: 'revoked' };
-  // Every key has an expiry — trial (14d) and paid (1y). There is NO lifetime key:
-  // a missing/null expiry is treated as expired (never grants infinite access).
+  // Perpetual keys: community and developer have no expiration time limit.
+  // A paid key with null expiresAt is also treated as lifetime/perpetual.
+  if (lk.plan === 'community' || lk.plan === 'developer' || (lk.plan === 'paid' && !lk.expiresAt)) {
+    return { active: true, reason: null };
+  }
   if (!lk.expiresAt || lk.expiresAt <= now) return { active: false, reason: 'expired' };
   return { active: true, reason: null };
 }
@@ -117,14 +123,17 @@ async function instanceSecrets(instanceId: string): Promise<string[]> {
   return out;
 }
 
-/** Prisma filter: keys that are still valid (not revoked, expiry in the future).
- * Every key has an expiry — trial (14d) and paid (1y); no lifetime keys. */
+/** Prisma filter: keys that are still valid (not revoked, expiry in the future or perpetual). */
 function liveKeyFilter(
   now: Date,
 ): import('../generated/client/index.js').Prisma.LicenseKeyWhereInput {
   return {
     revokedAt: null,
-    expiresAt: { gt: now },
+    OR: [
+      { expiresAt: { gt: now } },
+      { plan: { in: ['community', 'developer'] } },
+      { expiresAt: null, plan: { in: ['community', 'developer', 'paid'] } },
+    ],
   };
 }
 
@@ -279,7 +288,12 @@ app.post('/provision', async (req, reply) => {
     // Unclaimed, or already bound to THIS instance (re-provision after data loss).
     const notBoundElsewhere = { none: { revokedAt: null, instanceId: { not: instanceId } } };
     const paidGrant = await prisma.licenseKey.findFirst({
-      where: { plan: 'paid', revokedAt: null, email: emailEq, activations: notBoundElsewhere, expiresAt: { gt: now } },
+      where: {
+        plan: { in: ['paid', 'community', 'developer'] },
+        email: emailEq,
+        activations: notBoundElsewhere,
+        ...liveKeyFilter(now),
+      },
       orderBy: { createdAt: 'desc' },
     });
     const granted =
@@ -333,7 +347,7 @@ app.post('/provision', async (req, reply) => {
         appVersion,
       });
       await recordEvent({
-        type: granted.plan === 'paid' ? 'paid_claimed' : 'trial_claimed',
+        type: granted.plan === 'paid' ? 'paid_claimed' : `${granted.plan}_claimed`,
         licenseKeyId: granted.id,
         instanceId,
         ip,
@@ -583,12 +597,18 @@ app.post('/purchase-intent', async (req, reply) => {
     ip,
     meta: { intentId: intent.id, email: intent.email },
   });
-  // Send the buyer to checkout, carrying the intent id as Hotmart `sck` so the
-  // payment maps back to this instance even if the buyer pays with another email.
-  const base = (await paymentConfig()).checkoutUrl;
+  // Send the buyer to checkout, carrying the intent id as `sck` (Hotmart, Odoo or iDempiere)
+  // so the payment maps back to this instance even if the buyer pays with another email.
+  const pc = await paymentConfig();
+  const base = pc.checkoutUrl;
   const sep = base.includes('?') ? '&' : '?';
-  const checkoutUrl = `${base}${sep}sck=${encodeURIComponent(intent.id)}`;
-  return { ok: true, intentId: intent.id, checkoutUrl };
+  const queryParts = [
+    `sck=${encodeURIComponent(intent.id)}`,
+    intent.email ? `email=${encodeURIComponent(intent.email)}` : null,
+    `instance_id=${encodeURIComponent(instanceId)}`,
+  ].filter(Boolean).join('&');
+  const checkoutUrl = `${base}${sep}${queryParts}`;
+  return { ok: true, intentId: intent.id, checkoutUrl, billingProvider: pc.billingProvider };
 });
 
 // ── support ticket (customer opened a support request from their panel) ──
@@ -693,20 +713,220 @@ async function requireWebhookKey(req: FastifyRequest, reply: FastifyReply): Prom
 
 /**
  * Effective payment config: admin-panel settings (DB) take precedence, falling
- * back to env. Lets the vendor set the Hotmart checkout link, webhook token and
- * product id from the panel without redeploying.
+ * back to env. Lets the vendor set the active billing provider, checkout link,
+ * webhook secrets and product id from the panel without redeploying.
  */
 async function paymentConfig(): Promise<{
+  billingProvider: string;
   checkoutUrl: string;
   hotmartHottok: string | undefined;
   hotmartProductId: string | undefined;
+  odooSecret: string | undefined;
+  idempiereSecret: string | undefined;
 }> {
   const s = await prisma.serverSettings.findUnique({ where: { id: 'singleton' } });
   return {
+    billingProvider: s?.billingProvider || cfg.billingProvider,
     checkoutUrl: s?.checkoutUrl || cfg.checkoutUrl,
     hotmartHottok: s?.hotmartHottok || cfg.hotmartHottok,
     hotmartProductId: s?.hotmartProductId || cfg.hotmartProductId,
+    odooSecret: s?.odooSecret || cfg.odooSecret,
+    idempiereSecret: s?.idempiereSecret || cfg.idempiereSecret,
   };
+}
+
+/**
+ * Parse secret bytes for Standard Webhooks.
+ * If the secret starts with 'whsec_', the remainder is base64-decoded; otherwise utf-8.
+ */
+function getStandardWebhookSecretBytes(secret: string): Buffer {
+  if (secret.startsWith('whsec_')) {
+    const raw = secret.slice('whsec_'.length);
+    try {
+      const buf = Buffer.from(raw, 'base64');
+      if (buf.length > 0) return buf;
+    } catch {}
+  }
+  return Buffer.from(secret, 'utf8');
+}
+
+/**
+ * Verify a Standard Webhook signature (Svix / iDempiere standard webhooks).
+ * Headers: webhook-id, webhook-timestamp, webhook-signature (e.g. "v1,signature_base64")
+ * Signed payload: "${webhook-id}.${webhook-timestamp}.${rawBody}"
+ */
+function verifyStandardWebhook(opts: {
+  headers: Record<string, string | string[] | undefined>;
+  rawBody: string;
+  secret: string;
+  toleranceSeconds?: number;
+}): boolean {
+  const id = opts.headers['webhook-id'];
+  const timestamp = opts.headers['webhook-timestamp'];
+  const signatureHeader = opts.headers['webhook-signature'];
+  if (!id || !timestamp || !signatureHeader) return false;
+
+  const idStr = Array.isArray(id) ? id[0] : id;
+  const tsStr = Array.isArray(timestamp) ? timestamp[0] : timestamp;
+  const sigHeaderStr = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+
+  // Timestamp tolerance (default 5 minutes / 300s)
+  const ts = parseInt(tsStr, 10);
+  if (isNaN(ts)) return false;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const tolerance = opts.toleranceSeconds ?? 300;
+  if (Math.abs(nowSec - ts) > tolerance) {
+    return false;
+  }
+
+  const toSign = `${idStr}.${tsStr}.${opts.rawBody}`;
+  const secretBytes = getStandardWebhookSecretBytes(opts.secret);
+  const expectedSig = createHmac('sha256', secretBytes).update(toSign).digest('base64');
+
+  const signatures = sigHeaderStr.split(/\s+/).flatMap((s) => s.split(','));
+  for (let i = 0; i < signatures.length; i++) {
+    const part = signatures[i].trim();
+    if (part === 'v1' && i + 1 < signatures.length) {
+      const sig = signatures[i + 1].trim();
+      try {
+        const a = Buffer.from(sig, 'base64');
+        const b = Buffer.from(expectedSig, 'base64');
+        if (a.length === b.length && timingSafeEqual(a, b)) return true;
+      } catch {}
+    } else if (part.startsWith('v1,')) {
+      const sig = part.slice(3).trim();
+      try {
+        const a = Buffer.from(sig, 'base64');
+        const b = Buffer.from(expectedSig, 'base64');
+        if (a.length === b.length && timingSafeEqual(a, b)) return true;
+      } catch {}
+    }
+  }
+  return false;
+}
+
+/**
+ * Authenticate incoming Odoo webhook:
+ * Accepts:
+ * - Header X-Odoo-Secret or X-Odoo-Token matching configured odooSecret
+ * - Header Authorization: Bearer <secret> matching configured odooSecret OR an active WebhookKey (WHK-...)
+ * - Query param ?secret=<secret> or ?token=<secret> matching configured odooSecret
+ */
+async function odooAuthorized(req: FastifyRequest, expectedSecret?: string): Promise<boolean> {
+  const auth = req.headers.authorization;
+  const bearerToken = auth?.startsWith('Bearer ') ? auth.slice('Bearer '.length).trim() : '';
+  const headerSecret = (req.headers['x-odoo-secret'] as string | undefined)?.trim()
+    || (req.headers['x-odoo-token'] as string | undefined)?.trim()
+    || (req.headers['x-webhook-secret'] as string | undefined)?.trim();
+  const query = req.query as Record<string, unknown> | undefined;
+  const querySecret = typeof query?.secret === 'string' ? query.secret.trim()
+    : typeof query?.token === 'string' ? query.token.trim() : '';
+
+  const incomingSecret = headerSecret || querySecret || bearerToken;
+
+  if (expectedSecret && incomingSecret && incomingSecret === expectedSecret) {
+    return true;
+  }
+
+  // Also allow WebhookKey (WHK-...)
+  if (bearerToken) {
+    const wk = await prisma.webhookKey.findUnique({ where: { keyHash: hashKey(bearerToken) } });
+    if (wk && !wk.revokedAt) {
+      await prisma.webhookKey.update({ where: { id: wk.id }, data: { lastUsedAt: new Date() } });
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Authenticate incoming iDempiere webhook:
+ * Accepts:
+ * - Standard Webhooks HMAC-SHA256 signature (webhook-id, webhook-timestamp, webhook-signature) verified against idempiereSecret
+ * - Header Authorization: Bearer <token> matching idempiereSecret OR an active WebhookKey (WHK-...)
+ * - Header X-Idempiere-Token or X-Webhook-Secret matching idempiereSecret
+ */
+async function idempiereAuthorized(req: FastifyRequest, expectedSecret?: string): Promise<boolean> {
+  const rawBody = (req as any).rawBody ?? '';
+
+  // 1. Standard Webhooks HMAC signature
+  if (expectedSecret && req.headers['webhook-signature']) {
+    if (
+      verifyStandardWebhook({
+        headers: req.headers as Record<string, string | string[] | undefined>,
+        rawBody,
+        secret: expectedSecret,
+      })
+    ) {
+      return true;
+    }
+  }
+
+  // 2. Direct secret or Bearer token fallback
+  const auth = req.headers.authorization;
+  const bearerToken = auth?.startsWith('Bearer ') ? auth.slice('Bearer '.length).trim() : '';
+  const headerSecret = (req.headers['x-idempiere-token'] as string | undefined)?.trim()
+    || (req.headers['x-idempiere-secret'] as string | undefined)?.trim()
+    || (req.headers['x-webhook-secret'] as string | undefined)?.trim();
+  const query = req.query as Record<string, unknown> | undefined;
+  const querySecret = typeof query?.secret === 'string' ? query.secret.trim()
+    : typeof query?.token === 'string' ? query.token.trim() : '';
+
+  const incomingSecret = headerSecret || querySecret || bearerToken;
+  if (expectedSecret && incomingSecret && incomingSecret === expectedSecret) {
+    return true;
+  }
+
+  // 3. WebhookKey (WHK-...)
+  if (bearerToken) {
+    const wk = await prisma.webhookKey.findUnique({ where: { keyHash: hashKey(bearerToken) } });
+    if (wk && !wk.revokedAt) {
+      await prisma.webhookKey.update({ where: { id: wk.id }, data: { lastUsedAt: new Date() } });
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Extract an intent ID (UUID or cuid-like string) from descriptions or reference text. */
+function extractIntentIdFromText(text: string | null | undefined): string | null {
+  if (!text || typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  const match = trimmed.match(/sck[=:\s]+([a-zA-Z0-9_-]+)/i);
+  if (match) return match[1];
+  if (/^[a-zA-Z0-9_-]{15,45}$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+/**
+ * Universal helper to resolve a purchase intent by sck (intent id), instanceId, or customer email.
+ */
+async function resolvePurchaseIntent(opts: {
+  sck?: string | null;
+  instanceId?: string | null;
+  email?: string | null;
+}) {
+  if (opts.sck) {
+    const byId = await prisma.purchaseIntent.findUnique({ where: { id: String(opts.sck) } }).catch(() => null);
+    if (byId) return byId;
+  }
+  if (opts.instanceId) {
+    const byInstance = await prisma.purchaseIntent.findFirst({
+      where: { instanceId: opts.instanceId, status: 'pending' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (byInstance) return byInstance;
+  }
+  if (opts.email) {
+    const byEmail = await prisma.purchaseIntent.findFirst({
+      where: { email: { equals: opts.email, mode: 'insensitive' }, status: 'pending' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (byEmail) return byEmail;
+  }
+  return null;
 }
 
 /** Support WhatsApp number — admin-panel setting takes precedence over env. */
@@ -1029,6 +1249,333 @@ app.post('/webhook/hotmart', async (req, reply) => {
   return { ok: true, ignored: event };
 });
 
+// ── Odoo v17 + IzyPay Webhook ──
+app.post('/webhook/odoo', async (req, reply) => {
+  const pc = await paymentConfig();
+  if (!(await odooAuthorized(req, pc.odooSecret))) {
+    return reply.code(401).send({ error: 'unauthorized' });
+  }
+
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const query = (req.query ?? {}) as Record<string, unknown>;
+
+  const rawState = String(body.state ?? body.status ?? body.event ?? 'sale').toLowerCase();
+  const transaction = String(
+    body.transaction_id ??
+      body.payment_id ??
+      body.order_id ??
+      body.name ??
+      body.reference ??
+      body.client_order_ref ??
+      Date.now(),
+  );
+
+  // Idempotency: if already processed for this (transaction, provider)
+  const existingPayment = await prisma.payment.findFirst({
+    where: { transaction, provider: 'odoo', status: 'applied' },
+  });
+  if (existingPayment) {
+    return { ok: true, alreadyProcessed: true };
+  }
+
+  // Handle cancellations or drafts
+  if (rawState === 'cancel' || rawState === 'cancelled') {
+    await prisma.payment.create({
+      data: {
+        transaction,
+        provider: 'odoo',
+        event: rawState,
+        kind: 'cancel',
+        status: 'ignored',
+        raw: body as never,
+      },
+    });
+    return { ok: true, cancelled: true };
+  }
+
+  // Extract sck
+  const sck =
+    (typeof body.sck === 'string' && body.sck) ||
+    extractIntentIdFromText(typeof body.client_order_ref === 'string' ? body.client_order_ref : undefined) ||
+    extractIntentIdFromText(typeof body.note === 'string' ? body.note : undefined) ||
+    extractIntentIdFromText(typeof body.comment === 'string' ? body.comment : undefined) ||
+    (typeof query.sck === 'string' && query.sck) ||
+    null;
+
+  // Extract email
+  const partner = (typeof body.partner === 'object' && body.partner !== null ? body.partner : {}) as Record<string, unknown>;
+  const email =
+    (typeof body.partner_email === 'string' && body.partner_email) ||
+    (typeof body.email === 'string' && body.email) ||
+    (typeof partner.email === 'string' && partner.email) ||
+    null;
+
+  const name =
+    (typeof body.partner_name === 'string' && body.partner_name) ||
+    (typeof body.name === 'string' && body.name) ||
+    (typeof partner.name === 'string' && partner.name) ||
+    null;
+
+  const amount =
+    typeof body.amount_total === 'number'
+      ? body.amount_total
+      : typeof body.amount === 'number'
+        ? body.amount
+        : typeof body.price === 'number'
+          ? body.price
+          : undefined;
+
+  const currency =
+    typeof body.currency === 'string'
+      ? body.currency
+      : typeof body.currency_id === 'string'
+        ? body.currency_id
+        : undefined;
+
+  // Resolve intent
+  const intent = await resolvePurchaseIntent({ sck, email });
+  const targetEmail = email ?? intent?.email ?? undefined;
+  const instanceId = intent?.instanceId ?? (typeof body.instance_id === 'string' ? body.instance_id : null);
+
+  if (!targetEmail) {
+    await prisma.payment.create({
+      data: {
+        transaction,
+        provider: 'odoo',
+        event: rawState,
+        kind: 'purchase',
+        status: 'rejected',
+        amount,
+        currency,
+        raw: body as never,
+      },
+    });
+    return reply.code(202).send({ ok: false, reason: 'no_email' });
+  }
+
+  // Grant or renew +1 year (365 days)
+  const res = await grantOrRenewPaid({ email: targetEmail, name, instanceId });
+  const now = new Date();
+
+  if (intent) {
+    await prisma.purchaseIntent.update({
+      where: { id: intent.id },
+      data: {
+        status: 'paid',
+        licenseKeyId: res.licenseKeyId,
+        issuedKey: res.deliverKey,
+        paymentRef: transaction,
+        paidAt: now,
+      },
+    });
+  }
+
+  await prisma.payment.create({
+    data: {
+      transaction,
+      provider: 'odoo',
+      event: rawState,
+      kind: res.renewed ? 'renewal' : 'purchase',
+      status: 'applied',
+      email: targetEmail,
+      instanceId,
+      licenseKeyId: res.licenseKeyId,
+      amount,
+      currency,
+      expiresAt: res.expiresAt,
+      raw: body as never,
+    },
+  });
+
+  await recordEvent({
+    type: res.renewed ? 'payment_renewed' : 'payment_confirmed',
+    licenseKeyId: res.licenseKeyId,
+    instanceId: instanceId ?? undefined,
+    meta: { provider: 'odoo', intentId: intent?.id ?? null, email: targetEmail, transaction },
+  });
+
+  return { ok: true, renewed: res.renewed, intentId: intent?.id ?? null, expiresAt: res.expiresAt };
+});
+
+// ── iDempiere REST Webhook (Standard Webhooks) ──
+app.post('/webhook/idempiere', async (req, reply) => {
+  const pc = await paymentConfig();
+  if (!(await idempiereAuthorized(req, pc.idempiereSecret))) {
+    return reply.code(401).send({ error: 'unauthorized' });
+  }
+
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const query = (req.query ?? {}) as Record<string, unknown>;
+
+  // iDempiere payload can be { event, tableName, recordId, data: { ... } } or flat
+  const record = (typeof body.data === 'object' && body.data !== null
+    ? body.data
+    : typeof body.record === 'object' && body.record !== null
+      ? body.record
+      : body) as Record<string, unknown>;
+
+  const docStatus = String(record.DocStatus ?? body.DocStatus ?? body.event ?? 'CO').toUpperCase();
+  const transaction = String(
+    record.DocumentNo ??
+      record.C_Order_ID ??
+      body.recordId ??
+      record.ID ??
+      record.id ??
+      Date.now(),
+  );
+
+  // Idempotency
+  const existingPayment = await prisma.payment.findFirst({
+    where: { transaction, provider: 'idempiere', status: 'applied' },
+  });
+  if (existingPayment) {
+    return { ok: true, alreadyProcessed: true };
+  }
+
+  // Voided or Reversed
+  if (docStatus === 'VO' || docStatus === 'RE') {
+    await prisma.payment.create({
+      data: {
+        transaction,
+        provider: 'idempiere',
+        event: docStatus,
+        kind: 'cancel',
+        status: 'ignored',
+        raw: body as never,
+      },
+    });
+    return { ok: true, cancelled: true };
+  }
+
+  // Only apply when completed (CO) or closed (CL) or if docStatus not specified
+  const isCompleted = ['CO', 'CL', 'RECORD.COMPLETED'].includes(docStatus) || !record.DocStatus;
+  if (!isCompleted) {
+    await prisma.payment.create({
+      data: {
+        transaction,
+        provider: 'idempiere',
+        event: docStatus,
+        kind: 'purchase',
+        status: 'ignored',
+        raw: body as never,
+      },
+    });
+    return { ok: true, ignored: `doc_status_${docStatus}` };
+  }
+
+  // Extract sck
+  const sck =
+    (typeof record.sck === 'string' && record.sck) ||
+    extractIntentIdFromText(typeof record.POReference === 'string' ? record.POReference : undefined) ||
+    extractIntentIdFromText(typeof record.poreference === 'string' ? record.poreference : undefined) ||
+    extractIntentIdFromText(typeof record.Description === 'string' ? record.Description : undefined) ||
+    extractIntentIdFromText(typeof record.description === 'string' ? record.description : undefined) ||
+    (typeof query.sck === 'string' && query.sck) ||
+    null;
+
+  // Extract email
+  const bp = (typeof record.C_BPartner_ID === 'object' && record.C_BPartner_ID !== null
+    ? record.C_BPartner_ID
+    : {}) as Record<string, unknown>;
+  const user = (typeof record.AD_User_ID === 'object' && record.AD_User_ID !== null
+    ? record.AD_User_ID
+    : {}) as Record<string, unknown>;
+
+  const email =
+    (typeof record.EMail === 'string' && record.EMail) ||
+    (typeof record.Email === 'string' && record.Email) ||
+    (typeof record.email === 'string' && record.email) ||
+    (typeof bp.email === 'string' && bp.email) ||
+    (typeof user.email === 'string' && user.email) ||
+    null;
+
+  const name =
+    (typeof record.Name === 'string' && record.Name) ||
+    (typeof bp.identifier === 'string' && bp.identifier) ||
+    (typeof bp.name === 'string' && bp.name) ||
+    null;
+
+  const amount =
+    typeof record.GrandTotal === 'number'
+      ? record.GrandTotal
+      : typeof record.TotalLines === 'number'
+        ? record.TotalLines
+        : typeof record.amount === 'number'
+          ? record.amount
+          : undefined;
+
+  const currency =
+    typeof record.C_Currency_ID === 'string'
+      ? record.C_Currency_ID
+      : typeof record.currency === 'string'
+        ? record.currency
+        : undefined;
+
+  // Resolve intent
+  const intent = await resolvePurchaseIntent({ sck, email });
+  const targetEmail = email ?? intent?.email ?? undefined;
+  const instanceId = intent?.instanceId ?? (typeof record.instance_id === 'string' ? record.instance_id : null);
+
+  if (!targetEmail) {
+    await prisma.payment.create({
+      data: {
+        transaction,
+        provider: 'idempiere',
+        event: docStatus,
+        kind: 'purchase',
+        status: 'rejected',
+        amount,
+        currency,
+        raw: body as never,
+      },
+    });
+    return reply.code(202).send({ ok: false, reason: 'no_email' });
+  }
+
+  // Grant or renew +1 year (365 days)
+  const res = await grantOrRenewPaid({ email: targetEmail, name, instanceId });
+  const now = new Date();
+
+  if (intent) {
+    await prisma.purchaseIntent.update({
+      where: { id: intent.id },
+      data: {
+        status: 'paid',
+        licenseKeyId: res.licenseKeyId,
+        issuedKey: res.deliverKey,
+        paymentRef: transaction,
+        paidAt: now,
+      },
+    });
+  }
+
+  await prisma.payment.create({
+    data: {
+      transaction,
+      provider: 'idempiere',
+      event: docStatus,
+      kind: res.renewed ? 'renewal' : 'purchase',
+      status: 'applied',
+      email: targetEmail,
+      instanceId,
+      licenseKeyId: res.licenseKeyId,
+      amount,
+      currency,
+      expiresAt: res.expiresAt,
+      raw: body as never,
+    },
+  });
+
+  await recordEvent({
+    type: res.renewed ? 'payment_renewed' : 'payment_confirmed',
+    licenseKeyId: res.licenseKeyId,
+    instanceId: instanceId ?? undefined,
+    meta: { provider: 'idempiere', intentId: intent?.id ?? null, email: targetEmail, transaction },
+  });
+
+  return { ok: true, renewed: res.renewed, intentId: intent?.id ?? null, expiresAt: res.expiresAt };
+});
+
 // ── deactivate (release binding) ──
 app.post('/deactivate', async (req, reply) => {
   const p = DeactivateSchema.safeParse(req.body);
@@ -1096,7 +1643,7 @@ app.get('/admin/me', async (req, reply) => {
 const GrantSchema = z.object({
   email: z.string().email(),
   name: z.string().trim().min(1).max(120).optional(),
-  plan: z.enum(['trial', 'paid']).optional(), // default trial
+  plan: z.enum(['trial', 'paid', 'community', 'developer']).optional(), // default trial
   features: z.record(z.unknown()).optional(),
 });
 app.post('/admin/free-licenses', async (req, reply) => {
@@ -1105,14 +1652,19 @@ app.post('/admin/free-licenses', async (req, reply) => {
   if (!p.success) return reply.code(400).send({ error: 'validation' });
   const plan = p.data.plan ?? 'trial';
   const raw = generateKey();
+  const isPerpetual = plan === 'community' || plan === 'developer';
+  const expiresAt = isPerpetual
+    ? null
+    : new Date(Date.now() + (plan === 'trial' ? cfg.trialDays : cfg.paidDays) * DAY_MS);
+  const provisionedBy = plan === 'paid' ? 'admin-paid' : isPerpetual ? `admin-${plan}` : 'admin-trial';
   const created = await prisma.licenseKey.create({
     data: {
       keyHash: hashKey(raw),
       plan,
-      expiresAt: new Date(Date.now() + (plan === 'trial' ? cfg.trialDays : cfg.paidDays) * DAY_MS),
+      expiresAt,
       email: p.data.email,
       name: p.data.name,
-      provisionedBy: plan === 'paid' ? 'admin-paid' : 'admin-trial',
+      provisionedBy,
       features: (p.data.features ?? {}) as never,
       maxActivations: 1,
       secret: generateSecret(),
@@ -1120,7 +1672,7 @@ app.post('/admin/free-licenses', async (req, reply) => {
     },
   });
   await recordEvent({
-    type: plan === 'paid' ? 'admin_paid_grant' : 'admin_trial_grant',
+    type: `admin_${plan}_grant`,
     licenseKeyId: created.id,
   });
   return reply.code(201).send({ id: created.id, email: created.email });
@@ -1130,7 +1682,7 @@ app.get('/admin/free-licenses', async (req, reply) => {
   if (!(await requireAdmin(req, reply))) return;
   const now = new Date();
   const rows = await prisma.licenseKey.findMany({
-    where: { provisionedBy: { in: ['admin-trial', 'admin-paid'] } },
+    where: { provisionedBy: { startsWith: 'admin-' } },
     orderBy: { createdAt: 'desc' },
     include: {
       activations: {
@@ -1141,20 +1693,23 @@ app.get('/admin/free-licenses', async (req, reply) => {
     },
   });
   return {
-    licenses: rows.map((k) => ({
-      id: k.id,
-      plan: k.plan,
-      email: k.email,
-      name: k.name,
-      revoked: !!k.revokedAt,
-      expired: !k.revokedAt && !!k.expiresAt && k.expiresAt <= now,
-      expiresAt: k.expiresAt,
-      claimed: k.activations.length > 0,
-      activeInstances: k.activations.length,
-      lastHeartbeatAt: k.activations[0]?.lastHeartbeatAt ?? null,
-      lastIp: k.activations[0]?.lastIp ?? null,
-      createdAt: k.createdAt,
-    })),
+    licenses: rows.map((k) => {
+      const isPerpetual = k.plan === 'community' || k.plan === 'developer' || (k.plan === 'paid' && !k.expiresAt);
+      return {
+        id: k.id,
+        plan: k.plan,
+        email: k.email,
+        name: k.name,
+        revoked: !!k.revokedAt,
+        expired: !k.revokedAt && !isPerpetual && (!k.expiresAt || k.expiresAt <= now),
+        expiresAt: k.expiresAt,
+        claimed: k.activations.length > 0,
+        activeInstances: k.activations.length,
+        lastHeartbeatAt: k.activations[0]?.lastHeartbeatAt ?? null,
+        lastIp: k.activations[0]?.lastIp ?? null,
+        createdAt: k.createdAt,
+      };
+    }),
   };
 });
 
@@ -1162,7 +1717,7 @@ const KeysQuerySchema = z.object({
   q: z.string().trim().optional(),
   from: z.string().optional(),
   to: z.string().optional(),
-  plan: z.enum(['trial', 'paid']).optional(),
+  plan: z.enum(['trial', 'paid', 'community', 'developer']).optional(),
   status: z.enum(['active', 'expired', 'revoked']).optional(),
 });
 
@@ -1173,9 +1728,12 @@ function statusFilter(
 ): import('../generated/client/index.js').Prisma.LicenseKeyWhereInput {
   if (status === 'revoked') return { revokedAt: { not: null } };
   if (status === 'expired') {
-    // Any non-revoked key at/past its expiry (trial or paid); a missing expiry
-    // counts as expired too (there are no lifetime keys).
-    return { revokedAt: null, OR: [{ expiresAt: { lte: now } }, { expiresAt: null }] };
+    // Any non-revoked key at/past its expiry (trial or paid); exclude perpetual keys.
+    return {
+      revokedAt: null,
+      plan: { notIn: ['community', 'developer'] },
+      OR: [{ expiresAt: { lte: now } }, { expiresAt: null, plan: { not: 'paid' } }],
+    };
   }
   if (status === 'active') return liveKeyFilter(now);
   return {};
@@ -1248,7 +1806,8 @@ app.get('/admin/keys', async (req, reply) => {
         k.activations.map((a) => a.lastIp ?? a.firstIp).filter(Boolean) as string[],
       );
       const activeInstances = liveBindings.length;
-      const expired = !!k.expiresAt && k.expiresAt <= now;
+      const isPerpetual = k.plan === 'community' || k.plan === 'developer' || (k.plan === 'paid' && !k.expiresAt);
+      const expired = !k.revokedAt && !isPerpetual && (!k.expiresAt || k.expiresAt <= now);
       const statusReason = k.revokedAt
         ? 'revogada'
         : expired
@@ -1359,8 +1918,9 @@ async function buildUsers(opts: { q?: string; from?: string; to?: string }): Pro
     if (!u.name && k.name) u.name = k.name;
     u.keysTotal += 1;
     if (k.plan === 'paid') u.paid += 1;
-    else u.trial += 1;
-    const expired = !!k.expiresAt && k.expiresAt <= now;
+    else if (k.plan === 'trial') u.trial += 1;
+    const isPerpetual = k.plan === 'community' || k.plan === 'developer' || (k.plan === 'paid' && !k.expiresAt);
+    const expired = !isPerpetual && (!k.expiresAt || k.expiresAt <= now);
     if (k.revokedAt) u.revoked += 1;
     else if (expired) u.expired += 1;
     else u.active += 1;
@@ -1447,7 +2007,8 @@ app.get('/admin/users/:email', async (req, reply) => {
         lastRequestAt = a.lastHeartbeatAt;
       }
     }
-    const expired = !!k.expiresAt && k.expiresAt <= now;
+    const isPerpetual = k.plan === 'community' || k.plan === 'developer' || (k.plan === 'paid' && !k.expiresAt);
+    const expired = !isPerpetual && (!k.expiresAt || k.expiresAt <= now);
     return {
       id: k.id,
       plan: k.plan,
@@ -1531,20 +2092,19 @@ app.post('/admin/keys/:id/reactivate-trial', async (req, reply) => {
   return { ok: true };
 });
 
-// Set/override a PAID key's expiry date — the admin can push it out or shorten it.
-// A date is REQUIRED (no lifetime/null): every key always has an expiry.
-const SetExpirySchema = z.object({ expiresAt: z.string().datetime() });
+// Set/override a key's expiry date — the admin can push it out, shorten it, or set null for perpetual.
+const SetExpirySchema = z.object({ expiresAt: z.string().datetime().nullable() });
 app.post('/admin/keys/:id/set-expiry', async (req, reply) => {
   if (!(await requireAdmin(req, reply))) return;
   const { id } = req.params as { id: string };
   const p = SetExpirySchema.safeParse(req.body ?? {});
   if (!p.success) return reply.code(400).send({ error: 'validation' });
-  const expiresAt = new Date(p.data.expiresAt);
+  const expiresAt = p.data.expiresAt ? new Date(p.data.expiresAt) : null;
   await prisma.licenseKey.update({ where: { id }, data: { expiresAt } });
   await recordEvent({
     type: 'admin_set_expiry',
     licenseKeyId: id,
-    meta: { expiresAt: expiresAt.toISOString() },
+    meta: { expiresAt: expiresAt ? expiresAt.toISOString() : null },
   });
   return { ok: true };
 });
@@ -1716,7 +2276,8 @@ app.get('/admin/keys/:id', async (req, reply) => {
   const distinctIps = new Set(
     k.activations.map((a) => a.lastIp ?? a.firstIp).filter(Boolean) as string[],
   );
-  const expired = !!k.expiresAt && k.expiresAt <= now;
+  const isPerpetual = k.plan === 'community' || k.plan === 'developer' || (k.plan === 'paid' && !k.expiresAt);
+  const expired = !isPerpetual && (!k.expiresAt || k.expiresAt <= now);
   const reasonText = k.plan === 'paid' ? 'licença vencida' : 'teste expirado';
   const alerts = await prisma.licenseEvent.count({ where: { type: 'ip_alert', licenseKeyId: id } });
   const status = k.revokedAt ? 'revoked' : expired ? 'expired' : 'active';
@@ -1818,6 +2379,9 @@ app.get('/admin/events', async (req, reply) => {
 const SettingsSchema = z.object({
   logRetentionDays: z.number().int().positive().nullable(),
   checkoutUrl: z.string().url().nullable().optional(),
+  billingProvider: z.string().trim().max(50).nullable().optional(),
+  odooSecret: z.string().trim().max(200).nullable().optional(),
+  idempiereSecret: z.string().trim().max(200).nullable().optional(),
   hotmartHottok: z.string().trim().max(200).nullable().optional(),
   hotmartProductId: z.string().trim().max(100).nullable().optional(),
   supportWhatsapp: z.string().trim().max(30).nullable().optional(),
@@ -1829,12 +2393,18 @@ app.get('/admin/settings', async (req, reply) => {
   return {
     logRetentionDays: s?.logRetentionDays ?? null,
     checkoutUrl: s?.checkoutUrl ?? null,
+    billingProvider: s?.billingProvider ?? null,
+    odooSecret: s?.odooSecret ?? null,
+    idempiereSecret: s?.idempiereSecret ?? null,
     hotmartHottok: s?.hotmartHottok ?? null,
     hotmartProductId: s?.hotmartProductId ?? null,
     supportWhatsapp: s?.supportWhatsapp ?? null,
     // Defaults coming from env, shown as placeholders / "active fallback" hints.
     envDefaults: {
       checkoutUrl: cfg.checkoutUrl,
+      billingProvider: cfg.billingProvider,
+      odooSecretSet: !!cfg.odooSecret,
+      idempiereSecretSet: !!cfg.idempiereSecret,
       hotmartHottokSet: !!cfg.hotmartHottok,
       hotmartProductId: cfg.hotmartProductId ?? null,
       supportWhatsapp: cfg.supportWhatsapp ?? null,
@@ -1851,6 +2421,9 @@ app.put('/admin/settings', async (req, reply) => {
   const data = {
     logRetentionDays: body.data.logRetentionDays,
     checkoutUrl: norm(body.data.checkoutUrl),
+    billingProvider: norm(body.data.billingProvider),
+    odooSecret: norm(body.data.odooSecret),
+    idempiereSecret: norm(body.data.idempiereSecret),
     hotmartHottok: norm(body.data.hotmartHottok),
     hotmartProductId: norm(body.data.hotmartProductId),
     supportWhatsapp: norm(body.data.supportWhatsapp),
@@ -1975,7 +2548,13 @@ app.get('/admin/stats', async (req, reply) => {
   ]);
   const [activeKeys, expired] = await Promise.all([
     prisma.licenseKey.count({ where: liveKeyFilter(now) }),
-    prisma.licenseKey.count({ where: { revokedAt: null, expiresAt: { lte: now } } }),
+    prisma.licenseKey.count({
+      where: {
+        revokedAt: null,
+        plan: { notIn: ['community', 'developer'] },
+        OR: [{ expiresAt: { lte: now } }, { expiresAt: null, plan: { not: 'paid' } }],
+      },
+    }),
   ]);
   const trial = keys - paid;
 
@@ -2220,4 +2799,7 @@ async function main() {
     process.exit(1);
   }
 }
-void main();
+if (process.env.NODE_ENV !== 'test') {
+  void main();
+}
+export { app, prisma };

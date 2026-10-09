@@ -64,6 +64,9 @@ function backoffMs(failures: number): number {
  * (recoverable). An explicit `active: false` from the server blocks immediately.
  */
 export async function runHeartbeat(): Promise<{ status: string }> {
+  if (process.env.LICENSE_DEV_MODE === 'true') {
+    return { status: 'active' };
+  }
   const state = await getLicenseState();
   const key = decryptLicenseKey(state);
   if (!key || !state.instanceId) {

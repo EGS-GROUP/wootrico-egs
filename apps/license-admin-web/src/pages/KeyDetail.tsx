@@ -97,11 +97,15 @@ export default function KeyDetail() {
 
   async function doSetExpiry() {
     const cur = data?.key.expiresAt ? new Date(data.key.expiresAt).toISOString().slice(0, 10) : '';
-    const input = prompt('Nova data de vencimento (AAAA-MM-DD):', cur);
+    const input = prompt('Nova data de vencimento (AAAA-MM-DD) ou deixe vazio para perpétua:', cur);
     if (input === null) return; // cancelado
     const trimmed = input.trim();
-    if (!trimmed || Number.isNaN(new Date(trimmed).getTime())) {
-      alert('Informe uma data válida (AAAA-MM-DD).');
+    if (!trimmed || trimmed.toLowerCase() === 'perpetua' || trimmed.toLowerCase() === 'null') {
+      await act(() => setKeyExpiry(id, null));
+      return;
+    }
+    if (Number.isNaN(new Date(trimmed).getTime())) {
+      alert('Informe uma data válida (AAAA-MM-DD) ou deixe vazio para perpétua.');
       return;
     }
     const iso = new Date(`${trimmed}T23:59:59`).toISOString();
@@ -137,7 +141,9 @@ export default function KeyDetail() {
               <p className="mt-2 text-sm text-neutral-400">{k.name || k.email || 'Sem titular'}</p>
             </div>
             <div className="flex items-center gap-2">
-              <Badge tone={k.plan === 'paid' ? 'ok' : 'neutral'}>{k.plan === 'paid' ? 'Paga' : 'Teste'}</Badge>
+              <Badge tone={k.plan === 'paid' ? 'ok' : 'neutral'}>
+                {k.plan === 'paid' ? 'Paga' : k.plan === 'community' ? 'Community' : k.plan === 'developer' ? 'Dev/QA' : 'Teste'}
+              </Badge>
               <Badge tone={STATUS_TONE[k.status] ?? 'neutral'}>{STATUS_LABEL[k.status] ?? k.status}</Badge>
             </div>
           </div>
@@ -160,7 +166,7 @@ export default function KeyDetail() {
               <dd className="text-neutral-300">{fmt(k.createdAt)}</dd>
               <dt className="text-neutral-500">Vencimento</dt>
               <dd className={k.status === 'expired' ? 'text-red-300' : 'text-neutral-300'}>
-                {k.expiresAt ? fmt(k.expiresAt) : '—'}
+                {k.plan === 'community' || k.plan === 'developer' || !k.expiresAt ? 'Perpétua (sem limite)' : fmt(k.expiresAt)}
               </dd>
               {k.statusReason && (
                 <>
@@ -207,14 +213,14 @@ export default function KeyDetail() {
                   Revogar
                 </Button>
               )}
-              {/* Alterar vencimento: só para chave PAGA não-revogada (sempre uma data). */}
-              {k.plan === 'paid' && k.status !== 'revoked' && (
+              {/* Alterar vencimento: para chave não-revogada (data ou perpétua). */}
+              {k.plan !== 'trial' && k.status !== 'revoked' && (
                 <Button
                   variant="ghost"
                   className={ACTION_BTN}
                   loading={busy}
                   onClick={doSetExpiry}
-                  title="Define a data de vencimento da licença paga (renova ou encurta). Sempre uma data — não existe vitalícia."
+                  title="Define a data de vencimento da licença ou deixe vazio para perpétua."
                 >
                   Alterar vencimento
                 </Button>

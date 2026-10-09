@@ -27,7 +27,7 @@ export default function FreeLicenses() {
   const [showNew, setShowNew] = useState(false);
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
-  const [plan, setPlan] = useState<'trial' | 'paid'>('trial');
+  const [plan, setPlan] = useState<'trial' | 'paid' | 'community' | 'developer'>('trial');
   const [error, setError] = useState('');
 
   const load = () =>
@@ -94,10 +94,10 @@ export default function FreeLicenses() {
           <h1 className="mt-5 text-3xl font-semibold tracking-tight text-white">Licenças concedidas</h1>
           <p className="mt-2 max-w-2xl text-sm text-neutral-400">
             Conceda uma licença a um usuário pelo e-mail — <strong className="text-neutral-300">teste</strong>{' '}
-            (expira em ~14 dias) ou <strong className="text-neutral-300">paga</strong> (vence em 12 meses). O
-            cliente <strong className="text-neutral-300">não precisa de chave</strong>: ao ativar o Wootrico
-            com esse e-mail, o servidor entrega a licença automaticamente. Você pode reativar ou revogar a
-            qualquer momento.
+            (expira em ~14 dias), <strong className="text-neutral-300">paga</strong> (vence em 12 meses), ou{' '}
+            <strong className="text-neutral-300">community/developer</strong> (perpétua). O cliente{' '}
+            <strong className="text-neutral-300">não precisa de chave</strong>: ao ativar o Wootrico
+            com esse e-mail, o servidor entrega a licença automaticamente.
           </p>
         </div>
         <Button onClick={() => setShowNew((v) => !v)}>
@@ -122,9 +122,11 @@ export default function FreeLicenses() {
                 <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Nome do titular" />
               </Field>
               <Field label="Tipo">
-                <Select value={plan} onChange={(e) => setPlan(e.target.value as 'trial' | 'paid')}>
-                  <option value="trial">Grátis (teste)</option>
+                <Select value={plan} onChange={(e) => setPlan(e.target.value as 'trial' | 'paid' | 'community' | 'developer')}>
+                  <option value="trial">Grátis (teste ~14d)</option>
                   <option value="paid">Paga (12 meses)</option>
+                  <option value="community">Community (Perpétua / Open Source)</option>
+                  <option value="developer">Developer / QA (Perpétua / Sem expiração)</option>
                 </Select>
               </Field>
             </div>
@@ -151,7 +153,9 @@ export default function FreeLicenses() {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 mb-1">
                     <Badge tone={st.tone}>{st.label}</Badge>
-                    <Badge tone="neutral">{r.plan === 'paid' ? 'Paga' : 'Teste'}</Badge>
+                    <Badge tone="neutral">
+                      {r.plan === 'paid' ? 'Paga' : r.plan === 'community' ? 'Community' : r.plan === 'developer' ? 'Dev/QA' : 'Teste'}
+                    </Badge>
                     <span className="text-sm text-white truncate">{r.email ?? 'sem e-mail'}</span>
                   </div>
                   <p className="text-xs text-neutral-500 truncate">{r.name ?? '—'}</p>
@@ -181,7 +185,9 @@ export default function FreeLicenses() {
               </div>
               <dl className="mt-4 grid grid-cols-2 gap-y-2 text-xs border-t border-white/5 pt-4">
                 <dt className="text-neutral-500">Expira em</dt>
-                <dd className="text-neutral-300">{r.plan === 'paid' ? 'nunca' : fmt(r.expiresAt)}</dd>
+                <dd className="text-neutral-300">
+                  {r.plan === 'community' || r.plan === 'developer' || !r.expiresAt ? 'perpétua' : fmt(r.expiresAt)}
+                </dd>
                 <dt className="text-neutral-500">Instâncias ativas</dt>
                 <dd className="text-neutral-300">{r.activeInstances}</dd>
                 <dt className="text-neutral-500">Última validação</dt>

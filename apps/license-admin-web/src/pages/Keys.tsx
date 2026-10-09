@@ -9,7 +9,7 @@ function fmt(ts: string | null): string {
 }
 
 type StatusFilter = '' | 'active' | 'expired' | 'revoked';
-type PlanFilter = '' | 'trial' | 'paid';
+type PlanFilter = '' | 'trial' | 'paid' | 'community' | 'developer';
 
 export default function Keys() {
   const [keys, setKeys] = useState<LicenseKeyRow[] | null>(null);
@@ -69,6 +69,8 @@ export default function Keys() {
               <option value="">Todos</option>
               <option value="trial">Teste</option>
               <option value="paid">Paga</option>
+              <option value="community">Community</option>
+              <option value="developer">Developer</option>
             </select>
           </Field>
         </div>
@@ -103,7 +105,7 @@ export default function Keys() {
                         {k.revoked ? 'Revogada' : k.expired ? 'Expirada' : 'Ativa'}
                       </Badge>
                       <Badge tone={k.plan === 'paid' ? 'ok' : 'neutral'}>
-                        {k.plan === 'paid' ? 'Paga' : 'Teste'}
+                        {k.plan === 'paid' ? 'Paga' : k.plan === 'community' ? 'Community' : k.plan === 'developer' ? 'Dev/QA' : 'Teste'}
                       </Badge>
                       {k.alerts > 0 && (
                         <span className="inline-flex items-center gap-1 text-red-300 text-[11px]">

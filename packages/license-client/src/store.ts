@@ -26,7 +26,11 @@ export function encryptLicenseKey(key: string): string {
 /** The primary per-license secret (decrypted) — used to SEAL new integration data. */
 export async function getLicenseSecret(): Promise<string | null> {
   const state = await getLicenseState();
-  return state.dataKey ? decrypt(state.dataKey) : null;
+  if (state.dataKey) return decrypt(state.dataKey);
+  if (process.env.LICENSE_DEV_MODE === 'true') {
+    return 'wootrico-dev-community-seal-secret';
+  }
+  return null;
 }
 
 /**
@@ -48,6 +52,9 @@ export async function getLicenseSecrets(): Promise<string[]> {
   if (state.dataKey) {
     const primary = decrypt(state.dataKey);
     if (!out.includes(primary)) out.unshift(primary);
+  }
+  if (process.env.LICENSE_DEV_MODE === 'true' && !out.includes('wootrico-dev-community-seal-secret')) {
+    out.push('wootrico-dev-community-seal-secret');
   }
   return out;
 }

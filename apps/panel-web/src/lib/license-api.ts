@@ -3,7 +3,7 @@ import { api } from './api-client';
 export interface LicenseStatus {
   status: 'unactivated' | 'active' | 'warning' | 'blocked';
   instanceId: string | null;
-  plan: 'trial' | 'paid' | null;
+  plan: 'trial' | 'paid' | 'community' | 'developer' | null;
   expiresAt: string | null;
   features: Record<string, unknown>;
   lastValidatedAt: string | null;

@@ -16,12 +16,17 @@ export const cfg = {
   // this many days; the admin can override the date per key (always a date —
   // there are no lifetime keys).
   paidDays: Number(process.env.LICENSE_PAID_DAYS ?? 365),
-  // Checkout URL the customer is sent to when buying (Hotmart). The server
-  // appends `?sck=<intentId>` so the payment maps back even if the buyer's
-  // Hotmart e-mail differs from the registered one.
+  // Checkout URL the customer is sent to when buying (Odoo, iDempiere, Hotmart, etc.).
+  // The server appends `?sck=<intentId>` so the payment maps back even if the buyer's
+  // billing e-mail differs from the registered one.
   checkoutUrl: process.env.LICENSE_CHECKOUT_URL ?? 'https://pay.hotmart.com/F106461744G',
-  // Hotmart Postback (webhook) token — set in the license-server .env. Without
-  // it the Hotmart webhook rejects every call.
+  // Active billing provider: odoo | idempiere | hotmart | generic
+  billingProvider: process.env.BILLING_PROVIDER ?? 'odoo',
+  // Odoo v17 webhook secret (Bearer token or secret header)
+  odooSecret: process.env.ODOO_WEBHOOK_SECRET,
+  // iDempiere Standard Webhooks secret (whsec_...)
+  idempiereSecret: process.env.IDEMPIERE_WEBHOOK_SECRET,
+  // Hotmart Postback (webhook) token — set in the license-server .env.
   hotmartHottok: process.env.HOTMART_HOTTOK,
   // Optional: only accept Hotmart events for this product id (extra safety).
   hotmartProductId: process.env.HOTMART_PRODUCT_ID,

@@ -63,7 +63,7 @@ export const getKeys = (
     q?: string;
     from?: string;
     to?: string;
-    plan?: 'trial' | 'paid';
+    plan?: 'trial' | 'paid' | 'community' | 'developer';
     status?: 'active' | 'expired' | 'revoked';
   } = {},
 ) => {
@@ -283,7 +283,7 @@ export interface GrantedLicenseRow {
 export const getGrantedLicenses = () =>
   api<{ licenses: GrantedLicenseRow[] }>('/admin/free-licenses');
 
-export const grantLicense = (body: { email: string; name?: string; plan?: 'trial' | 'paid' }) =>
+export const grantLicense = (body: { email: string; name?: string; plan?: 'trial' | 'paid' | 'community' | 'developer' }) =>
   api<{ id: string; email: string | null }>('/admin/free-licenses', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -293,8 +293,8 @@ export const grantLicense = (body: { email: string; name?: string; plan?: 'trial
 export const reactivateTrial = (id: string) =>
   api<{ ok: boolean }>(`/admin/keys/${id}/reactivate-trial`, { method: 'POST' });
 
-/** Set/override a paid key's expiry (ISO string). A date is required (no lifetime). */
-export const setKeyExpiry = (id: string, expiresAt: string) =>
+/** Set/override a key's expiry (ISO string or null for perpetual). */
+export const setKeyExpiry = (id: string, expiresAt: string | null) =>
   api<{ ok: boolean }>(`/admin/keys/${id}/set-expiry`, {
     method: 'POST',
     body: JSON.stringify({ expiresAt }),
@@ -374,11 +374,17 @@ export const getKeyEvents = (id: string) =>
 export interface ServerSettings {
   logRetentionDays: number | null;
   checkoutUrl: string | null;
+  billingProvider: string | null;
+  odooSecret: string | null;
+  idempiereSecret: string | null;
   hotmartHottok: string | null;
   hotmartProductId: string | null;
   supportWhatsapp: string | null;
   envDefaults?: {
     checkoutUrl: string | null;
+    billingProvider: string | null;
+    odooSecretSet: boolean;
+    idempiereSecretSet: boolean;
     hotmartHottokSet: boolean;
     hotmartProductId: string | null;
     supportWhatsapp: string | null;
@@ -390,6 +396,9 @@ export const getSettings = () => api<ServerSettings>('/admin/settings');
 export const updateSettings = (body: {
   logRetentionDays: number | null;
   checkoutUrl?: string | null;
+  billingProvider?: string | null;
+  odooSecret?: string | null;
+  idempiereSecret?: string | null;
   hotmartHottok?: string | null;
   hotmartProductId?: string | null;
   supportWhatsapp?: string | null;

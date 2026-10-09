@@ -175,7 +175,10 @@ model ServerSettings {
   id               String   @id @default("singleton")
   logRetentionDays Int?     @map("log_retention_days")
   // Payment config, editable from the admin panel (falls back to env when null).
-  checkoutUrl      String?  @map("checkout_url") // Hotmart checkout link
+  checkoutUrl      String?  @map("checkout_url") // Checkout link (Odoo, iDempiere, Hotmart, or custom)
+  billingProvider  String?  @default("odoo") @map("billing_provider") // odoo | idempiere | hotmart | generic
+  odooSecret       String?  @map("odoo_secret") // Bearer token or secret for Odoo v17
+  idempiereSecret  String?  @map("idempiere_secret") // whsec_... Standard Webhooks secret for iDempiere
   hotmartHottok    String?  @map("hotmart_hottok") // Hotmart webhook token
   hotmartProductId String?  @map("hotmart_product_id") // optional product filter
   // Support WhatsApp number (digits, country code) delivered to all clients via

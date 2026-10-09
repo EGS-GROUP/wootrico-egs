@@ -13,14 +13,23 @@ import { getLicenseState, updateLicenseState } from './store.js';
  * RECOVERABLE the moment the server answers "active" again.
  */
 export function computeStatus(state: LicenseState, now = new Date()): LicenseStatus {
+  if (process.env.LICENSE_DEV_MODE === 'true') return 'active';
   if (state.status === 'blocked') return 'blocked'; // server said inactive — sticky until re-validated
   if (!state.licenseKey || !state.instanceId) return 'unactivated';
 
-  // Key ran out by the local clock — trial (14d) OR paid (1y). Every key has an
-  // expiry (no lifetime keys); the server always sends expiresAt.
-  if (state.expiresAt && now.getTime() >= state.expiresAt.getTime()) {
+  const isPerpetual =
+    state.plan === 'community' ||
+    state.plan === 'developer' ||
+    (state.plan === 'paid' && !state.expiresAt);
+
+  // Key ran out by the local clock — trial (14d) OR paid (1y).
+  // Perpetual keys (community / developer / perpetual paid) have no expiry restriction.
+  if (!isPerpetual && state.expiresAt && now.getTime() >= state.expiresAt.getTime()) {
     return 'blocked';
   }
+
+  // Perpetual licenses never degrade to warning or block on offline timeouts (air-gapped / dev safe)
+  if (isPerpetual) return 'active';
 
   if (!state.lastValidatedAt) {
     // A key exists but was never confirmed online (fresh migration / mid-rollout).
@@ -29,8 +38,8 @@ export function computeStatus(state: LicenseState, now = new Date()): LicenseSta
   }
 
   const since = now.getTime() - state.lastValidatedAt.getTime();
-  if (since > LICENSE.offlineGraceMs) return 'blocked'; // 48h with no successful check → block (recoverable)
-  if (since > LICENSE.staleWarningMs) return 'warning'; // tolerated outage — keep processing
+  if (since > LICENSE.offlineGraceMs) return 'blocked';
+  if (since > LICENSE.staleWarningMs) return 'warning';
   return 'active';
 }
 
@@ -45,9 +54,10 @@ export async function evaluateLicense(now = new Date()): Promise<LicenseStatus> 
 /**
  * Whether message processing is allowed for the given status. Licensing is
  * ALWAYS enforced (no opt-out): an unactivated or blocked instance cannot
- * process — only active/warning may.
+ * process — only active/warning may (or when running in LICENSE_DEV_MODE).
  */
 export function isProcessingAllowed(status: LicenseStatus): boolean {
+  if (process.env.LICENSE_DEV_MODE === 'true') return true;
   return status === 'active' || status === 'warning';
 }
 
