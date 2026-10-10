@@ -15,9 +15,16 @@ export function detectPayloadOrigin(body: unknown): ProviderType | 'unknown' {
   // zapi: phone + momment
   if (b.phone && b.momment) return 'zapi';
 
-  // evolution (Evolution-API style): event + data with key/message
-  if (typeof b.event === 'string' && b.data && (b.data.key || b.data.message)) {
-    return 'evolution';
+  // evolution (Evolution-API style or Evolution GO whatsmeow)
+  if (
+    (typeof b.event === 'string' && (b.event === 'Message' || b.event.toLowerCase().includes('message') || b.event.toLowerCase().includes('upsert'))) ||
+    b.instance ||
+    b.instanceId ||
+    (b.data && (b.data.key || b.data.message || b.data.Info || b.data.Message || Array.isArray(b.data)))
+  ) {
+    if (b.data?.key || b.data?.message || b.data?.Info || b.data?.Message || Array.isArray(b.data) || b.event === 'Message') {
+      return 'evolution';
+    }
   }
 
   return 'unknown';

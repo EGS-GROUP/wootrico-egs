@@ -39,18 +39,28 @@ function mimeFromBase64(b64?: string | null): string | null {
   return null;
 }
 
-function extractMedia(message: Record<string, any>): { media: InboundMedia | null; caption: string } {
+function extractMedia(
+  message: Record<string, any>,
+  container?: Record<string, any>,
+): { media: InboundMedia | null; caption: string } {
   // document-with-caption wraps the real documentMessage one level down
   const inner = message.documentWithCaptionMessage?.message ?? message;
   for (const [key, type] of MEDIA_KEYS) {
     const m = inner[key];
     if (!m) continue;
     const caption: string = m.caption ?? '';
-    const base64 = message.base64 ?? inner.base64 ?? undefined;
+    const base64 = container?.base64 ?? message.base64 ?? inner.base64 ?? undefined;
+    const url =
+      container?.mediaUrl ??
+      container?.url ??
+      message.mediaUrl ??
+      inner.mediaUrl ??
+      m.url ??
+      undefined;
     const media: InboundMedia = {
       type,
       // Evolution GO gives a plain decrypted URL (image/video/doc) ...
-      url: message.mediaUrl ?? inner.mediaUrl ?? undefined,
+      url,
       // ... or inline base64 (audio/ptt/sticker).
       base64,
       // Prefer the sniffed mime when we have the bytes (fixes sticker webp→png).
@@ -70,7 +80,8 @@ function getContextInfo(message: Record<string, any>): Record<string, any> | und
     message.videoMessage?.contextInfo ??
     message.audioMessage?.contextInfo ??
     message.documentMessage?.contextInfo ??
-    message.stickerMessage?.contextInfo
+    message.stickerMessage?.contextInfo ??
+    message.contextInfo
   );
 }
 
@@ -79,16 +90,59 @@ export function parseEvolutionInbound(
   ctx: ParseContext,
 ): NormalizedInboundMessage {
   const body = (payload ?? {}) as Record<string, any>;
-  const event = (body.event ?? '').toString();
-  const data = (body.data ?? {}) as Record<string, any>;
-  const info = (data.Info ?? {}) as Record<string, any>;
-  const message = (data.Message ?? {}) as Record<string, any>;
+  const event = (body.event ?? body.type ?? '').toString();
 
-  const isGroup = !!info.IsGroup;
+  // Known non-message events to ignore immediately (receipts, presence, status, etc.)
+  const eventLc = event.toLowerCase();
+  const IGNORED_EVENTS = [
+    'connection.update',
+    'status.instance',
+    'qrcode.updated',
+    'presence.update',
+    'chats.set',
+    'contacts.set',
+    'chats.upsert',
+    'labels.edit',
+    'labels.association',
+    'call',
+    'message.ack',
+    'messages.receipt',
+  ];
+  if (IGNORED_EVENTS.some((ev) => eventLc === ev || eventLc.startsWith(ev))) {
+    return {
+      origin: 'evolution',
+      kind: 'ignored',
+      phone: null,
+      text: '',
+      name: null,
+      isGroup: false,
+      fromMe: false,
+      fromApi: false,
+      providerMessageId: null,
+      raw: payload,
+    };
+  }
+
+  // Find the message item: can be body.data, body.data.messages[0], body.data[0], or body itself
+  const rawData = body.data ?? body;
+  const item: Record<string, any> =
+    (Array.isArray(rawData) ? rawData[0] : (Array.isArray(rawData?.messages) ? rawData.messages[0] : rawData)) ?? {};
+
+  // Support both whatsmeow (Evolution Go: Info / Message) and Baileys (Evolution API: key / message)
+  const info = (item.Info ?? item.info ?? {}) as Record<string, any>;
+  const key = (item.key ?? item.Key ?? {}) as Record<string, any>;
+  const message = (item.Message ?? item.message ?? {}) as Record<string, any>;
+
+  const chatJid: string = (info.Chat ?? key.remoteJid ?? item.remoteJid ?? '').toString();
+  const isGroup = Boolean(info.IsGroup || chatJid.endsWith('@g.us') || key.participant || item.participant);
+  const fromMe = Boolean(info.IsFromMe ?? key.fromMe ?? item.fromMe);
+  const providerMessageId = (info.ID ?? key.id ?? key.ID ?? item.id ?? item.ID ?? null)
+    ? String(info.ID ?? key.id ?? key.ID ?? item.id ?? item.ID)
+    : null;
   // PushName is always the SENDER's name. On a fromMe message the sender is the
   // WhatsApp account owner — never the contact — so it must NOT be used to name
   // the Chatwoot contact (it would label the contact with our own name).
-  const pushName = !info.IsFromMe ? (info.PushName ?? null) : null;
+  const pushName = !fromMe ? (info.PushName ?? item.pushName ?? item.pushname ?? null) : null;
 
   const base: NormalizedInboundMessage = {
     origin: 'evolution',
@@ -97,22 +151,22 @@ export function parseEvolutionInbound(
     text: '',
     name: pushName,
     isGroup,
-    fromMe: !!info.IsFromMe,
+    fromMe,
     fromApi: false, // Evolution GO has no API-source flag; echo handled via mapping
-    providerMessageId: info.ID ?? null,
+    providerMessageId,
     raw: payload,
   };
 
-  // Only "Message" events carry chat content; ignore the rest (receipts, presence…).
-  if (event && event !== 'Message') {
+  // If there is no chat, no message id and empty message, ignore non-message noise
+  if (!chatJid && !providerMessageId && Object.keys(message).length === 0) {
     return { ...base, kind: 'ignored' };
   }
 
   // Revoke (delete-for-everyone) arrives as a protocolMessage.
-  const proto = message.protocolMessage as Record<string, any> | undefined;
+  const proto = (message.protocolMessage ?? message.ProtocolMessage) as Record<string, any> | undefined;
   const protoType = (proto?.type ?? '').toString().toUpperCase();
-  if (proto && protoType === 'REVOKE') {
-    const delId = proto.key?.ID ?? proto.key?.id;
+  if (proto && (protoType === 'REVOKE' || protoType === '0' || protoType === '1' || item.messageType === 'protocolMessage')) {
+    const delId = proto.key?.ID ?? proto.key?.id ?? proto.key?.Id;
     return {
       ...base,
       kind: 'message_deleted',
@@ -133,7 +187,8 @@ export function parseEvolutionInbound(
   const secretEnc = message.secretEncryptedMessage as Record<string, any> | undefined;
   const editedContentUnavailable = !!secretEnc && (info.Edit ?? '') !== '';
   const isEdit =
-    !!data.IsEdit ||
+    !!item.IsEdit ||
+    !!item.isEdit ||
     (info.Edit ?? '') !== '' ||
     protoType === 'MESSAGE_EDIT' ||
     protoType === '14' ||
@@ -151,19 +206,29 @@ export function parseEvolutionInbound(
     return { ...base, kind: 'ignored' };
   }
 
-  const { media, caption } = reaction ? { media: null, caption: '' } : extractMedia(effective);
+  const { media, caption } = reaction ? { media: null, caption: '' } : extractMedia(effective, item);
   const text = reaction
     ? `reagiu com ${reactionText}`
-    : (effective.conversation ?? effective.extendedTextMessage?.text ?? caption ?? '');
+    : (
+        effective.conversation ??
+        effective.extendedTextMessage?.text ??
+        effective.text ??
+        effective.buttonsResponseMessage?.selectedDisplayText ??
+        effective.buttonsResponseMessage?.selectedButtonId ??
+        effective.templateButtonReplyMessage?.selectedDisplayText ??
+        effective.templateButtonReplyMessage?.selectedId ??
+        effective.listResponseMessage?.title ??
+        effective.listResponseMessage?.singleSelectReply?.selectedRowId ??
+        caption ??
+        ''
+      );
 
-  const chatJid: string = info.Chat ?? '';
-  const fromMe = !!info.IsFromMe;
   // The contact is always the OTHER party. For an outgoing (fromMe) DM the Sender
   // is OUR own number, so the contact must come from Chat (the recipient).
   // For an incoming DM the Sender IS the contact and SenderAlt gives its PN↔LID
   // pair. Classify candidates by suffix (@s.whatsapp.net vs @lid) so a LID is
   // never mis-read as a phone number once Meta switches a chat to LID addressing.
-  const senderJid = (info.Sender ?? '').toString();
+  const senderJid = (info.Sender ?? key.participant ?? (fromMe ? '' : chatJid) ?? '').toString();
   const senderAlt = (info.SenderAlt ?? '').toString();
   const candidates = (
     isGroup
@@ -172,11 +237,14 @@ export function parseEvolutionInbound(
         ? [chatJid] // outgoing DM → contact = recipient
         : [senderJid, senderAlt, chatJid] // incoming DM → contact = sender
   ).filter(Boolean);
+
   let pnJid = '';
   let lidJid = '';
   for (const j of candidates) {
     if (j.endsWith('@lid')) lidJid ||= j;
-    else if (j.endsWith('@s.whatsapp.net') || j.endsWith('@c.us')) pnJid ||= j;
+    else if (j.endsWith('@s.whatsapp.net') || j.endsWith('@c.us') || (!j.includes('@') && /^\d+$/.test(j))) {
+      pnJid ||= j;
+    }
   }
   const phoneDigits = pnJid
     ? normalizePhone(stripJid(pnJid), ctx.defaultCountry).digits
@@ -191,18 +259,22 @@ export function parseEvolutionInbound(
 
   // Group metadata: name + the full participant roster (a PN↔LID directory we
   // can use to seed number discovery).
-  const groupData = (data.groupData ?? {}) as Record<string, any>;
-  const groupName = isGroup ? (groupData.Name ?? null) : null;
+  const groupData = (item.groupData ?? item.groupMetadata ?? body.data?.groupData ?? {}) as Record<string, any>;
+  const groupName = isGroup ? (groupData.Name ?? groupData.subject ?? item.groupName ?? null) : null;
   const directoryHints =
-    isGroup && Array.isArray(groupData.Participants)
-      ? (groupData.Participants as any[])
+    isGroup && Array.isArray(groupData.Participants ?? groupData.participants)
+      ? ((groupData.Participants ?? groupData.participants) as any[])
           .map((p) => ({
             pn: p?.PhoneNumber?.endsWith?.('@s.whatsapp.net')
               ? normalizePhone(stripJid(p.PhoneNumber), ctx.defaultCountry).digits
+              : p?.id?.endsWith?.('@s.whatsapp.net')
+                ? normalizePhone(stripJid(p.id), ctx.defaultCountry).digits
+                : null,
+            lid: (p?.LID ?? p?.JID ?? p?.lid ?? p?.id)?.endsWith?.('@lid')
+              ? stripJid(p.LID ?? p.JID ?? p.lid ?? p.id)
               : null,
-            lid: (p?.LID ?? p?.JID)?.endsWith?.('@lid') ? stripJid(p.LID ?? p.JID) : null,
             // whatsmeow serializes the participant's name as DisplayName.
-            pushName: p?.DisplayName ?? p?.PushName ?? p?.Name ?? null,
+            pushName: p?.DisplayName ?? p?.PushName ?? p?.Name ?? p?.name ?? null,
           }))
           .filter((h) => h.pn || h.lid)
       : undefined;
@@ -228,7 +300,7 @@ export function parseEvolutionInbound(
         proto?.key?.id ??
         secretEnc?.targetMessageKey?.ID ??
         secretEnc?.targetMessageKey?.id ??
-        info.ID ??
+        providerMessageId ??
         undefined)
       : undefined,
     editedContentUnavailable,

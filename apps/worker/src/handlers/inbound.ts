@@ -154,7 +154,7 @@ export async function handleInbound(payload: unknown, integrationId: string): Pr
       status: integration.conversationStatus as ChatwootConversationStatus,
       reopen: integration.reabrirConversa,
     });
-    const conversationId = conversation?.id;
+    const conversationId = conversation?.id ?? conversation?.payload?.id ?? conversation?.data?.id;
     if (!conversationId) return logger.warn({ integrationId }, 'inbound: missing conversation id');
 
     let inReplyTo: number | undefined = opts?.inReplyToOverride;

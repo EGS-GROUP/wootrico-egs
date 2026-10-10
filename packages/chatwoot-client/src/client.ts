@@ -206,12 +206,23 @@ export class ChatwootClient {
     try {
       return await this.createContact(opts);
     } catch (err) {
-      if (axios.isAxiosError(err) && err.response?.status === 422 && wantPhone) {
-        const byPhone = await this.searchContact(opts.phoneNumber!);
-        const found = byPhone.find((c) => digits(c?.phone_number) === wantPhone);
-        if (found) {
-          await this.adoptIdentifier(found, opts.identifier);
-          return found;
+      if (axios.isAxiosError(err) && err.response?.status === 422) {
+        if (wantPhone) {
+          const byPhone = await this.searchContact(opts.phoneNumber!);
+          const found = byPhone.find((c) => digits(c?.phone_number) === wantPhone);
+          if (found) {
+            await this.adoptIdentifier(found, opts.identifier);
+            return found;
+          }
+        }
+        // If Chatwoot rejected the phone number (e.g. invalid format in Chatwoot's validator),
+        // retry creating contact without phone number so the inbound message is not lost.
+        if (opts.phoneNumber) {
+          try {
+            return await this.createContact({ name: opts.name, identifier: opts.identifier });
+          } catch {
+            /* ignore, throw original err below */
+          }
         }
       }
       throw err;
@@ -327,7 +338,7 @@ export class ChatwootClient {
       inbox_id: opts.inboxId,
       status: opts.status,
     });
-    return res.data;
+    return res.data?.payload?.conversation ?? res.data?.payload ?? res.data?.data ?? res.data;
   }
 
   async reopenConversation(conversationId: string | number): Promise<void> {
