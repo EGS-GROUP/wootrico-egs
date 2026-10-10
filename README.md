@@ -31,7 +31,7 @@ uma **licença** e gerencia tudo por um **painel** com tema escuro.
 - **3 provedores**: Evolution&nbsp;Go, UAZAPI, Z-API (extensível).
 - **Mensagens em ordem e sem duplicar** — lock por conversa (Redis) + dedup durável.
 - **Licença controlada pelo fornecedor** — ativação online + token assinado (Ed25519) + heartbeat; vínculo por instância (sem compartilhamento).
-- **Privacy-by-design** — **nenhum conteúdo de mensagem** fica em repouso no banco.
+- **Privacy-by-design & LGPD** — webhooks efêmeros via RabbitMQ, auditoria sem PII e retenção configurável de histórico de conversas/mídias com expiração automática.
 
 ## 🚀 Instalação (VPS · Docker Swarm)
 

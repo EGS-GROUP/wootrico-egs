@@ -318,6 +318,19 @@ export async function handleInbound(payload: unknown, integrationId: string): Pr
         isGroup: norm.isGroup,
         providerMessageId: norm.providerMessageId,
       });
+      // Capture the edited message to conversation history as well (deduped by editKey)
+      await logConversationMessage({
+        integrationId,
+        peerKey: identifier,
+        contactName: isGroup ? (norm.groupName ?? null) : (norm.name ?? norm.senderName ?? null),
+        contactNumber: isGroup ? null : (discoveredPhone ?? norm.phone ?? norm.jid ?? null),
+        senderName: senderLabel,
+        isGroup,
+        direction: norm.fromMe ? 'outgoing' : 'incoming',
+        messageType: norm.media?.type ?? 'text',
+        text: edited ? `${edited} (editada)` : '_(mensagem editada)_',
+        providerMessageId: editKey,
+      });
       return;
     }
 

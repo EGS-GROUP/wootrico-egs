@@ -35,8 +35,13 @@ export default async function webhookRoutes(app: FastifyInstance) {
     } else {
       const lic = await assertLicenseActive();
       if (!lic.allowed) {
-        accepted = false;
         reason = `license_${lic.status}`;
+        // Chatwoot callbacks (outbound) are blocked when license is inactive.
+        // Provider webhooks (inbound) are ALWAYS enqueued so conversation history
+        // is captured; the worker enforces the license gate before mirroring to Chatwoot.
+        if (source === 'chatwoot') {
+          accepted = false;
+        }
       }
     }
 
