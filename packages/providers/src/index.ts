@@ -6,6 +6,6 @@ export { parseZapiInbound } from './zapi/parse-inbound.js';
 export { ZapiProvider } from './zapi/client.js';
 export { parseEvolutionInbound } from './evolution/parse-inbound.js';
 export { EvolutionProvider } from './evolution/client.js';
-export { normalizePhone, isE164 } from './util/phone.js';
+export { normalizePhone, isE164, getCountryDialCode, COUNTRY_DIAL } from './util/phone.js';
 export { urlToBase64, toDataUrl } from './util/media.js';
 export { detectPayloadOrigin } from './util/detect.js';

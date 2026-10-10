@@ -474,8 +474,16 @@ export default function IntegrationForm() {
                 <option value="resolved">Resolvida</option>
               </Select>
             </Field>
-            <Field label="País padrão (ISO-2)">
-              <Input value={country} onChange={(e) => setCountry(e.target.value.toUpperCase())} maxLength={2} />
+            <Field
+              label="País padrão (ISO-2)"
+              hint="Código do país em 2 letras (ex: PE = Peru +51, BR = Brasil +55, AR = Argentina +54, CO = Colômbia +57)"
+            >
+              <Input
+                value={country}
+                onChange={(e) => setCountry(e.target.value.toUpperCase())}
+                maxLength={2}
+                placeholder="PE"
+              />
             </Field>
             <Checkbox label="Reabrir conversas resolvidas" checked={reabrir} onChange={setReabrir} />
             <Checkbox label="Desconsiderar grupos" checked={desconsiderar} onChange={setDesconsiderar} />

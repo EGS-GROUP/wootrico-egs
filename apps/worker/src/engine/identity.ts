@@ -57,10 +57,25 @@ export async function resolveIdentity(input: IdentityInput): Promise<ResolvedIde
     try {
       return await prisma.$transaction(async (tx) => {
         const byLid = lid ? await tx.contactIdentity.findUnique({ where: { lid } }) : null;
-        const byPn = pn ? await tx.contactIdentity.findUnique({ where: { pn } }) : null;
+        let byPn = pn ? await tx.contactIdentity.findUnique({ where: { pn } }) : null;
+
+        // Auto-heal corrupted pn if previously saved with accidental '55' prefix (e.g. 5551... for Peru)
+        if (!byPn && pn) {
+          const corrupted = await tx.contactIdentity.findUnique({ where: { pn: `55${pn}` } });
+          if (corrupted) {
+            await tx.contactIdentity.update({ where: { id: corrupted.id }, data: { pn } });
+            corrupted.pn = pn;
+            byPn = corrupted;
+          }
+        }
 
         // Same person seen under two separate rows → merge (LID is the stable id).
         if (byLid && byPn && byLid.id !== byPn.id) {
+          // If byLid had the corrupted '55' prefix, heal it instead of flagging conflict
+          if (byLid.pn && byLid.pn === `55${pn}`) {
+            byLid.pn = pn;
+          }
+
           // ...unless the two rows already carry a DIFFERENT counterpart. Then this
           // event contradicts an established pairing and merging would fuse two
           // distinct people into one identity — irreversibly, dragging their
@@ -95,7 +110,7 @@ export async function resolveIdentity(input: IdentityInput): Promise<ResolvedIde
         const existing = byLid ?? byPn;
         if (existing) {
           const data: Record<string, unknown> = { lastSeenAt: new Date() };
-          if (pn && !existing.pn) data.pn = pn;
+          if (pn && (!existing.pn || existing.pn === `55${pn}`)) data.pn = pn;
           if (lid && !existing.lid) data.lid = lid;
           if (pushName && pushName !== existing.pushName) data.pushName = pushName;
           if (source === 'dm' && !existing.seenInDm) data.seenInDm = true;

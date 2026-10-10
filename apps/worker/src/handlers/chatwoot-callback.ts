@@ -1,5 +1,5 @@
 import { hmac, logger } from '@wootrico/config';
-import { urlToBase64 } from '@wootrico/providers';
+import { urlToBase64, normalizePhone } from '@wootrico/providers';
 import { withLock, throttle } from '@wootrico/cache';
 import {
   storeMapping,
@@ -116,17 +116,36 @@ export async function handleChatwootCallback(
     canonicalKey = sender.identifier;
     sendTarget = sender.identifier;
   } else {
-    const pn = sender.phone_number ? String(sender.phone_number).replace(/\D/g, '') : null;
+    const rawSenderPhone = sender.phone_number ? String(sender.phone_number) : null;
+    const normalizedSender = rawSenderPhone
+      ? normalizePhone(rawSenderPhone, integration.defaultCountry)
+      : null;
+    const pn = normalizedSender?.digits ?? null;
+
     // Chatwoot's contact identifier is our canonical id (set on inbound); fall
     // back to resolving by phone so both paths agree on the same canonical key.
     const identity = pn
       ? await resolveIdentity({ pn })
       : await getIdentityById(sender.identifier);
     canonicalKey = identity?.id ?? pn ?? sender.identifier;
+
+    // Normalize any stored identity phone in case old records had the corrupted prefix
+    const normalizedIdentityPn = identity?.pn
+      ? normalizePhone(identity.pn, integration.defaultCountry).digits
+      : null;
+
     // Prefer the contact's phone; else the number we discovered for it; else the
     // LID; never fall back to the canonical UUID as a send target.
     sendTarget =
-      pn ?? identity?.pn ?? (identity?.lid ? `${identity.lid}@lid` : sender.identifier);
+      pn ?? normalizedIdentityPn ?? (identity?.lid ? `${identity.lid}@lid` : sender.identifier);
+
+    // If Chatwoot's contact had an unnormalized or corrupted phone (+55... for a Peruvian contact),
+    // update it in Chatwoot so the contact card reflects the true number.
+    if (sender.id && normalizedSender && rawSenderPhone !== normalizedSender.e164) {
+      void rt.chatwoot
+        .updateContact(sender.id, { phoneNumber: normalizedSender.e164 })
+        .catch(() => undefined);
+    }
   }
   if (!canonicalKey || !sendTarget) return;
 
