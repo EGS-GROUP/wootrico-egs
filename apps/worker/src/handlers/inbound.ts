@@ -16,8 +16,12 @@ const CONTACT_TTL = 3600; // seconds
 
 /** Provider webhook → Chatwoot (inbound pipeline + dedup cases 1/3/4). */
 export async function handleInbound(payload: unknown, integrationId: string): Promise<void> {
+  logger.info({ integrationId }, 'inbound: start processing inbound job');
   const rt = await loadIntegrationRuntime(integrationId);
-  if (!rt || !rt.integration) return;
+  if (!rt || !rt.integration) {
+    logger.warn({ integrationId }, 'inbound: aborting because loadIntegrationRuntime returned null');
+    return;
+  }
   const { provider, chatwoot, inboxId, providerType, integration } = rt;
 
   const norm = provider.parseInbound(payload, {
@@ -25,16 +29,34 @@ export async function handleInbound(payload: unknown, integrationId: string): Pr
     ignoreGroups: integration.desconsiderarGrupo,
   });
 
+  logger.info(
+    {
+      integrationId,
+      providerType,
+      kind: norm.kind,
+      fromMe: norm.fromMe,
+      isGroup: norm.isGroup,
+      phone: norm.phone,
+      senderName: norm.senderName,
+      providerMessageId: norm.providerMessageId,
+      hasText: Boolean(norm.text),
+      hasMedia: Boolean(norm.media),
+    },
+    'inbound: message normalized by provider parser',
+  );
+
   if (norm.kind === 'ignored' || norm.kind === 'unknown') {
-    // 'ignored' is normal (receipts, presence, empty reactions). 'unknown' means
-    // the provider parser didn't recognize the payload shape — usually a
-    // provider/gateway mismatch. Surface it so this failure mode isn't invisible.
-    if (norm.kind === 'unknown') {
-      logger.warn(
-        { integrationId, providerType, origin: norm.origin },
-        'inbound: payload not recognized by provider parser — message dropped',
-      );
-    }
+    logger.info(
+      {
+        integrationId,
+        providerType,
+        kind: norm.kind,
+        origin: norm.origin,
+        isGroup: norm.isGroup,
+        ignoreGroups: integration.desconsiderarGrupo,
+      },
+      'inbound: message dropped (ignored or unknown)',
+    );
     return;
   }
 
@@ -89,7 +111,13 @@ export async function handleInbound(payload: unknown, integrationId: string): Pr
   const identifier = isGroup
     ? (norm.groupId ?? '')
     : (identity?.id ?? norm.phone ?? norm.jid ?? norm.lid ?? '');
-  if (!identifier) return;
+  if (!identifier) {
+    logger.warn(
+      { integrationId, isGroup, phone: norm.phone, jid: norm.jid, lid: norm.lid },
+      'inbound: no identifier could be resolved — message dropped',
+    );
+    return;
+  }
   // Actual address used to send/delete on the provider (phone, jid or group id).
   // We reply via what THIS company received, not the globally-discovered number.
   const sendTarget = isGroup
@@ -114,6 +142,19 @@ export async function handleInbound(payload: unknown, integrationId: string): Pr
       !isGroup && discoveredPhone
         ? normalizePhone(discoveredPhone, integration.defaultCountry).e164
         : undefined;
+
+    logger.info(
+      {
+        integrationId,
+        contactName,
+        identifier,
+        inboxId,
+        direction,
+        phoneNumber,
+        isGroup,
+      },
+      'inbound: preparing to mirror message to Chatwoot',
+    );
     // Prefix the participant name on group messages so it's clear who spoke.
     const body =
       opts?.bodyOverride ??
@@ -273,6 +314,16 @@ export async function handleInbound(payload: unknown, integrationId: string): Pr
         senderJid,
         provider: providerType,
       });
+      logger.info(
+        {
+          integrationId,
+          contactId,
+          conversationId,
+          chatwootMessageId: created.id,
+          providerMessageId: mappingProviderId,
+        },
+        'inbound: message successfully mirrored and created in Chatwoot',
+      );
     }
   };
 
@@ -363,7 +414,13 @@ export async function handleInbound(payload: unknown, integrationId: string): Pr
     // never create a duplicate in Chatwoot. Covers both directions.
     if (norm.providerMessageId) {
       const already = await getMappingByProviderId(integrationId, norm.providerMessageId);
-      if (already) return;
+      if (already) {
+        logger.info(
+          { integrationId, providerMessageId: norm.providerMessageId },
+          'inbound: message already mirrored previously — skipped duplicate',
+        );
+        return;
+      }
     }
     const logCreated = (direction: 'incoming' | 'outgoing') =>
       void logMessage({

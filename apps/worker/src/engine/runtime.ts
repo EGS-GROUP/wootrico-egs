@@ -22,7 +22,14 @@ export async function loadIntegrationRuntime(
     where: { id: integrationId },
     include: { providerConfig: true },
   });
-  if (!integration || !integration.providerConfig) return null;
+  if (!integration) {
+    logger.warn({ integrationId }, 'runtime: integration not found in database');
+    return null;
+  }
+  if (!integration.providerConfig) {
+    logger.warn({ integrationId }, 'runtime: integration has no providerConfig in database');
+    return null;
+  }
 
   // Credentials are license-sealed: try every secret the instance has had (the
   // seal secret rotates on reactivation). On failure, re-validate once to pull a
@@ -74,6 +81,16 @@ export async function loadIntegrationRuntime(
       data: { chatwootInboxId: inboxId },
     });
   }
+
+  logger.info(
+    {
+      integrationId,
+      providerType: providerConfig.provider,
+      inboxId,
+      chatwootBaseUrl: integration.chatwootBaseUrl,
+    },
+    'runtime: integration runtime loaded successfully',
+  );
 
   return { integration, provider, chatwoot, inboxId, providerType: providerConfig.provider };
 }
