@@ -1,0 +1,125 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  WOOTRICO v2 — Despliegue en Dokploy (Docker Compose)
+#  Incluye: Postgres + RabbitMQ + Redis + Panel Web/API (app) + Worker
+# ═══════════════════════════════════════════════════════════════════════════
+
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wootrico}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-wootrico}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-wootrico} -d ${POSTGRES_DB:-wootrico}']
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-wootrico}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: /
+      RABBITMQ_NODE_PORT: 5672
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    mem_limit: ${RABBITMQ_MEMORY_LIMIT:-1g}
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 10s
+      timeout: 10s
+      retries: 24
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--save', '60', '1', '--appendonly', 'no']
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 24
+
+  # ─────────────────────────────────────────────────────────────────────────
+  #  APP — Panel Web + Ingress de Webhooks (Fastify en puerto 3000)
+  # ─────────────────────────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime-app
+    image: wootrico:latest
+    restart: unless-stopped
+    command: >-
+      sh -c "pnpm --filter @wootrico/db exec prisma migrate deploy &&
+             node apps/panel-api/dist/server.cjs"
+    expose:
+      - '3000'
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-wootrico}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-wootrico}?schema=public
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wootrico}:${RABBITMQ_PASSWORD}@rabbitmq:5672/%2F
+      REDIS_URL: redis://redis:6379
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY}
+      LICENSE_DEV_MODE: ${LICENSE_DEV_MODE:-true}
+      NODE_ENV: production
+      PORT: '3000'
+      HOST: 0.0.0.0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 10s
+      start_period: 60s
+      retries: 10
+
+  # ─────────────────────────────────────────────────────────────────────────
+  #  WORKER — Motor en segundo plano: consume RabbitMQ y entrega a Chatwoot
+  # ─────────────────────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime-app
+    image: wootrico:latest
+    restart: unless-stopped
+    command: node apps/worker/dist/main.cjs
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-wootrico}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-wootrico}?schema=public
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wootrico}:${RABBITMQ_PASSWORD}@rabbitmq:5672/%2F
+      REDIS_URL: redis://redis:6379
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY}
+      LICENSE_DEV_MODE: ${LICENSE_DEV_MODE:-true}
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      app: { condition: service_healthy }
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  redis_data:
