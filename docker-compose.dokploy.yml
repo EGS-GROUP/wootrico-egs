@@ -60,9 +60,7 @@ services:
       target: runtime-app
     image: wootrico:latest
     restart: unless-stopped
-    command: >-
-      sh -c "pnpm --filter @wootrico/db exec prisma migrate deploy &&
-             node apps/panel-api/dist/server.cjs"
+    command: node apps/panel-api/dist/server.cjs
     expose:
       - '3000'
     environment:

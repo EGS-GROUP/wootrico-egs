@@ -38,7 +38,7 @@ RUN find . -name node_modules -type d -prune -exec rm -rf '{}' + \
 FROM node:20-bookworm-slim AS runtime-app
 ENV NODE_ENV=production
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@10.12.1 --activate
 WORKDIR /app
 
 # License server URL baked into the CUSTOMER image so clients never configure it

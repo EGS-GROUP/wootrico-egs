@@ -1,8 +1,14 @@
 import { env, logger } from '@wootrico/config';
+import { runMigrations } from '@wootrico/db';
 import { applyConnectionOverrides } from '@wootrico/db/conn';
 import { buildApp } from './app.js';
 
 async function main() {
+  // Ensure database schema is migrated before reading settings or handling requests.
+  await runMigrations().catch((err) =>
+    logger.error({ err }, 'failed to run database migrations automatically'),
+  );
+
   // Apply any stored RabbitMQ/Redis overrides before connections are opened.
   await applyConnectionOverrides().catch((err) =>
     logger.warn({ err }, 'failed to apply connection overrides; using env'),

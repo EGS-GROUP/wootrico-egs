@@ -1,5 +1,5 @@
 import { logger, AMQP, LICENSE } from '@wootrico/config';
-import { prisma } from '@wootrico/db';
+import { prisma, runMigrations } from '@wootrico/db';
 import { applyConnectionOverrides } from '@wootrico/db/conn';
 import { consume, closeQueue } from '@wootrico/queue';
 import { closeRedis } from '@wootrico/cache';
@@ -16,6 +16,11 @@ const CLEANUP_MS = 60 * 60 * 1000; // 1h
 const RESTART_POLL_MS = 15 * 1000; // 15s — watch for a panel-triggered restart
 
 async function main() {
+  // Ensure database schema is migrated before reading settings or starting queues.
+  await runMigrations().catch((err) =>
+    logger.error({ err }, 'failed to run database migrations automatically'),
+  );
+
   // Apply stored RabbitMQ/Redis overrides before opening any connection.
   await applyConnectionOverrides().catch((err) =>
     logger.warn({ err }, 'failed to apply connection overrides; using env'),
