@@ -420,7 +420,10 @@ export default function IntegrationForm() {
                 <Field label="URL base">
                   <Input value={eBaseUrl} onChange={(e) => setEBaseUrl(e.target.value)} placeholder="https://sua.evolution.com" />
                 </Field>
-                <Field label="Chave de API">
+                <Field
+                  label="Chave de API (Token da Instância)"
+                  hint="Token específico da instância no Evolution Go (cada número tem seu próprio token)."
+                >
                   <SecretInput value={eApiKey} onChange={setEApiKey} />
                 </Field>
               </>

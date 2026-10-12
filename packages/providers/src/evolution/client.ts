@@ -184,8 +184,10 @@ export class EvolutionProvider implements WhatsAppProvider {
       const loggedIn = data.LoggedIn ?? data.loggedIn ?? false;
       const ok = Boolean(connected && loggedIn);
       const name = data.Name ?? data.name;
+      const jid = data.JID ?? data.jid ?? data.OwnerJid ?? data.ownerJid ?? data.Phone ?? data.phone;
+      const jidLabel = jid ? ` (${String(jid).split('@')[0]})` : '';
       const detail = ok
-        ? `conectado${name ? `: ${name}` : ''}`
+        ? `conectado${name ? `: ${name}` : ''}${jidLabel}`
         : `Connected=${connected} LoggedIn=${loggedIn}`;
       return { ok, detail };
     } catch (err) {
