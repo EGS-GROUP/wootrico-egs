@@ -118,10 +118,49 @@ export async function handleChatwootCallback(
     sendTarget = sender.identifier;
   } else {
     const rawSenderPhone = sender.phone_number ? String(sender.phone_number) : null;
-    const normalizedSender = rawSenderPhone
+    let normalizedSender = rawSenderPhone
       ? normalizePhone(rawSenderPhone, integration.defaultCountry)
       : null;
-    const pn = normalizedSender?.digits ?? null;
+    let pn = normalizedSender?.digits ?? null;
+
+    // Inbound messages record senderJid with the true WhatsApp identity (e.g. 51977329908@s.whatsapp.net or <lid>@lid).
+    const prevInbound = await prisma.messageMapping.findFirst({
+      where: {
+        integrationId,
+        chatwootConversationId: String(conversation.id),
+        senderJid: { not: null },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    let knownJidTarget: string | null = null;
+    if (prevInbound?.senderJid) {
+      if (prevInbound.senderJid.endsWith('@lid')) {
+        knownJidTarget = prevInbound.senderJid;
+      } else {
+        const rawJidPhone = prevInbound.senderJid.split('@')[0] ?? '';
+        if (rawJidPhone && /^\d+$/.test(rawJidPhone)) {
+          knownJidTarget = rawJidPhone;
+        }
+      }
+    }
+
+    // If we have a known phone number from the inbound WhatsApp senderJid,
+    // and Chatwoot's contact phone had an extra '55' prefix (e.g. 5551977329908 vs 51977329908)
+    // or pn was missing, adopt the true WhatsApp phone number.
+    if (knownJidTarget && !knownJidTarget.endsWith('@lid')) {
+      if (pn && (pn === `55${knownJidTarget}` || (pn.startsWith('55') && pn.endsWith(knownJidTarget)))) {
+        logger.info(
+          { integrationId, oldPn: pn, correctedPn: knownJidTarget },
+          'chatwoot-callback: detected and stripped corrupted 55 prefix using inbound senderJid',
+        );
+        pn = knownJidTarget;
+        normalizedSender = normalizePhone(knownJidTarget, integration.defaultCountry);
+      } else if (!pn) {
+        pn = knownJidTarget;
+        normalizedSender = normalizePhone(knownJidTarget, integration.defaultCountry);
+      }
+    }
 
     // Chatwoot's contact identifier is our canonical id (set on inbound); fall
     // back to resolving by phone so both paths agree on the same canonical key.
@@ -131,14 +170,30 @@ export async function handleChatwootCallback(
     canonicalKey = identity?.id ?? pn ?? sender.identifier;
 
     // Normalize any stored identity phone in case old records had the corrupted prefix
-    const normalizedIdentityPn = identity?.pn
+    let normalizedIdentityPn = identity?.pn
       ? normalizePhone(identity.pn, integration.defaultCountry).digits
       : null;
+    if (knownJidTarget && normalizedIdentityPn === `55${knownJidTarget}`) {
+      normalizedIdentityPn = knownJidTarget;
+    }
 
-    // Prefer the contact's phone; else the number we discovered for it; else the
-    // LID; never fall back to the canonical UUID as a send target.
+    // Heal corrupted pn in contact_identities table if observed
+    if (identity && knownJidTarget && identity.pn === `55${knownJidTarget}`) {
+      void prisma.contactIdentity
+        .update({
+          where: { id: identity.id },
+          data: { pn: knownJidTarget },
+        })
+        .catch(() => undefined);
+    }
+
+    // Prefer the known WhatsApp target from inbound JID, else contact's phone,
+    // else the number we discovered for it, else LID.
     sendTarget =
-      pn ?? normalizedIdentityPn ?? (identity?.lid ? `${identity.lid}@lid` : sender.identifier);
+      knownJidTarget ??
+      pn ??
+      normalizedIdentityPn ??
+      (identity?.lid ? `${identity.lid}@lid` : sender.identifier);
 
     // If sendTarget fell back to a UUID, never send it to Evolution Go; recover recipient from previous message mapping
     if (sendTarget && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sendTarget)) {

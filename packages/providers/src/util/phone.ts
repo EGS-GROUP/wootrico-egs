@@ -152,6 +152,18 @@ export function normalizePhone(raw: string, defaultCountry = 'BR'): NormalizedPh
     digits = digits.slice(2);
   }
 
+  // Strip erroneous '55' prefix for foreign numbers that cannot be Brazilian numbers (no matching Brazilian DDD):
+  if (
+    digits.startsWith('5552') || // Mexico +52
+    digits.startsWith('5556') || // Chile +56
+    digits.startsWith('5557') || // Colombia +57
+    digits.startsWith('5558') || // Venezuela +58
+    digits.startsWith('55591') || // Bolivia +591
+    digits.startsWith('55593')    // Ecuador +593
+  ) {
+    digits = digits.slice(2);
+  }
+
   // Prepend dial code if missing:
   // - If it already starts with the country dial code, it's complete.
   // - If it explicitly came with a '+' or from a WhatsApp JID with valid length, it's already an international number.

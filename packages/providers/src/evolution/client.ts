@@ -108,9 +108,28 @@ export class EvolutionProvider implements WhatsAppProvider {
       };
     }
 
-    const res = await this.http.post(path, body);
-    const id = extractSentId(res.data);
-    return { providerMessageIds: id ? [id] : [], raw: res.data };
+    try {
+      const res = await this.http.post(path, body);
+      const id = extractSentId(res.data);
+      return { providerMessageIds: id ? [id] : [], raw: res.data };
+    } catch (err: any) {
+      const errMsg = String(err?.response?.data?.error ?? err?.message ?? '');
+      // If Evolution Go fails with "number +... is not registered on WhatsApp" and the recipient started with '55'
+      // followed by a foreign code like Peru 51 (e.g. 5551977329908 -> 51977329908), retry with the stripped number!
+      if (
+        errMsg.includes('not registered on WhatsApp') &&
+        typeof number === 'string' &&
+        number.startsWith('55') &&
+        number.length >= 12
+      ) {
+        const candidate = number.slice(2);
+        const retryBody = { ...body, number: candidate };
+        const retryRes = await this.http.post(path, retryBody);
+        const retryId = extractSentId(retryRes.data);
+        return { providerMessageIds: retryId ? [retryId] : [], raw: retryRes.data };
+      }
+      throw err;
+    }
   }
 
   async deleteMessage(providerMessageId: string, opts?: { recipient?: string }): Promise<void> {
