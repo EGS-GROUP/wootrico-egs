@@ -89,6 +89,11 @@ services:
       timeout: 10s
       start_period: 60s
       retries: 10
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    networks:
+      - default
+      - dokploy-network
 
   # ─────────────────────────────────────────────────────────────────────────
   #  WORKER — Motor en segundo plano: consume RabbitMQ y entrega a Chatwoot
@@ -116,8 +121,18 @@ services:
       rabbitmq: { condition: service_healthy }
       redis: { condition: service_healthy }
       app: { condition: service_healthy }
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    networks:
+      - default
+      - dokploy-network
 
 volumes:
   postgres_data:
   rabbitmq_data:
   redis_data:
+
+networks:
+  default:
+  dokploy-network:
+    external: true
