@@ -247,7 +247,7 @@ export function parseEvolutionInbound(
     }
   }
   const phoneDigits = pnJid
-    ? normalizePhone(stripJid(pnJid), ctx.defaultCountry).digits
+    ? normalizePhone(pnJid, ctx.defaultCountry).digits
     : null;
   const lid = lidJid ? stripJid(lidJid) : null;
 
@@ -266,9 +266,9 @@ export function parseEvolutionInbound(
       ? ((groupData.Participants ?? groupData.participants) as any[])
           .map((p) => ({
             pn: p?.PhoneNumber?.endsWith?.('@s.whatsapp.net')
-              ? normalizePhone(stripJid(p.PhoneNumber), ctx.defaultCountry).digits
+              ? normalizePhone(p.PhoneNumber, ctx.defaultCountry).digits
               : p?.id?.endsWith?.('@s.whatsapp.net')
-                ? normalizePhone(stripJid(p.id), ctx.defaultCountry).digits
+                ? normalizePhone(p.id, ctx.defaultCountry).digits
                 : null,
             lid: (p?.LID ?? p?.JID ?? p?.lid ?? p?.id)?.endsWith?.('@lid')
               ? stripJid(p.LID ?? p.JID ?? p.lid ?? p.id)

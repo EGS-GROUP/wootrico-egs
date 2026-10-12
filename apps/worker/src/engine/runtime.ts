@@ -1,5 +1,6 @@
 import { prisma } from '@wootrico/db';
 import { decryptSecretAny, logger } from '@wootrico/config';
+import { cacheGet, cacheSet } from '@wootrico/cache';
 import { ensureLicenseSecret, getLicenseSecrets } from '@wootrico/license-client';
 import type { ProviderConfig } from '@wootrico/types';
 import { createProvider, type WhatsAppProvider } from '@wootrico/providers';
@@ -69,6 +70,25 @@ export async function loadIntegrationRuntime(
   });
 
   let inboxId = integration.chatwootInboxId;
+
+  // Validate that the stored inbox actually exists in Chatwoot (e.g. not deleted, recreated or mismatched)
+  if (inboxId) {
+    const cacheKey = `cw:inbox_valid:${integration.chatwootAccountId}:${inboxId}`;
+    const cachedOk = await cacheGet(cacheKey);
+    if (!cachedOk) {
+      const existing = await chatwoot.getInbox(inboxId);
+      if (!existing?.id) {
+        logger.warn(
+          { integrationId, staleInboxId: inboxId, inboxName: integration.chatwootInboxName },
+          'runtime: stored chatwootInboxId not found in Chatwoot — re-resolving inbox by name',
+        );
+        inboxId = null;
+      } else {
+        await cacheSet(cacheKey, 1, 3600);
+      }
+    }
+  }
+
   if (!inboxId) {
     const urls = buildWebhookUrls(await publicBaseUrl(), integration.webhookToken);
     inboxId = await chatwoot.ensureInbox({
@@ -76,10 +96,17 @@ export async function loadIntegrationRuntime(
       webhookUrl: urls.chatwoot,
       allowMessagesAfterResolved: true,
     });
-    await prisma.integration.update({
-      where: { id: integration.id },
-      data: { chatwootInboxId: inboxId },
-    });
+    if (inboxId) {
+      await prisma.integration.update({
+        where: { id: integration.id },
+        data: { chatwootInboxId: inboxId },
+      });
+      await cacheSet(`cw:inbox_valid:${integration.chatwootAccountId}:${inboxId}`, 1, 3600);
+      logger.info(
+        { integrationId, newInboxId: inboxId, inboxName: integration.chatwootInboxName },
+        'runtime: updated integration with recovered chatwootInboxId',
+      );
+    }
   }
 
   logger.info(

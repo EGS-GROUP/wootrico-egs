@@ -1,3 +1,4 @@
+import { prisma } from '@wootrico/db';
 import { logger, hmac } from '@wootrico/config';
 import { normalizePhone } from '@wootrico/providers';
 import { assertLicenseActive } from '@wootrico/license-client';
@@ -22,7 +23,7 @@ export async function handleInbound(payload: unknown, integrationId: string): Pr
     logger.warn({ integrationId }, 'inbound: aborting because loadIntegrationRuntime returned null');
     return;
   }
-  const { provider, chatwoot, inboxId, providerType, integration } = rt;
+  let { provider, chatwoot, inboxId, providerType, integration } = rt;
 
   const norm = provider.parseInbound(payload, {
     defaultCountry: integration.defaultCountry,
@@ -189,12 +190,40 @@ export async function handleInbound(payload: unknown, integrationId: string): Pr
       avatarTarget: sendTarget,
     });
 
-    const conversation = await chatwoot.findOrCreateConversation({
-      contactId,
-      inboxId,
-      status: integration.conversationStatus as ChatwootConversationStatus,
-      reopen: integration.reabrirConversa,
-    });
+    let conversation: any;
+    try {
+      conversation = await chatwoot.findOrCreateConversation({
+        contactId,
+        inboxId,
+        status: integration.conversationStatus as ChatwootConversationStatus,
+        reopen: integration.reabrirConversa,
+      });
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        logger.warn(
+          { integrationId, staleInboxId: inboxId, inboxName: integration.chatwootInboxName },
+          'inbound: conversation create 404 — recovering inbox by name',
+        );
+        const resolved = await chatwoot.findInboxByName(integration.chatwootInboxName);
+        if (resolved?.id && String(resolved.id) !== String(inboxId)) {
+          inboxId = String(resolved.id);
+          await prisma.integration.update({
+            where: { id: integration.id },
+            data: { chatwootInboxId: inboxId },
+          });
+          conversation = await chatwoot.findOrCreateConversation({
+            contactId,
+            inboxId,
+            status: integration.conversationStatus as ChatwootConversationStatus,
+            reopen: integration.reabrirConversa,
+          });
+        } else {
+          throw err;
+        }
+      } else {
+        throw err;
+      }
+    }
     const conversationId = conversation?.id ?? conversation?.payload?.id ?? conversation?.data?.id;
     if (!conversationId) return logger.warn({ integrationId }, 'inbound: missing conversation id');
 

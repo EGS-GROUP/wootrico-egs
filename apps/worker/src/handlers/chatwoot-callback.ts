@@ -1,3 +1,4 @@
+import { prisma } from '@wootrico/db';
 import { hmac, logger } from '@wootrico/config';
 import { urlToBase64, normalizePhone } from '@wootrico/providers';
 import { withLock, throttle } from '@wootrico/cache';
@@ -138,6 +139,17 @@ export async function handleChatwootCallback(
     // LID; never fall back to the canonical UUID as a send target.
     sendTarget =
       pn ?? normalizedIdentityPn ?? (identity?.lid ? `${identity.lid}@lid` : sender.identifier);
+
+    // If sendTarget fell back to a UUID, never send it to Evolution Go; recover recipient from previous message mapping
+    if (sendTarget && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sendTarget)) {
+      const prev = await prisma.messageMapping.findFirst({
+        where: { integrationId, chatwootConversationId: String(conversation.id) },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (prev?.recipient && !/^[0-9a-f-]{36}$/i.test(prev.recipient)) {
+        sendTarget = prev.recipient;
+      }
+    }
 
     // If Chatwoot's contact had an unnormalized or corrupted phone (+55... for a Peruvian contact),
     // update it in Chatwoot so the contact card reflects the true number.

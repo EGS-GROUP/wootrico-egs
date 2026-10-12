@@ -105,6 +105,36 @@ export interface NormalizedPhone {
 }
 
 /**
+ * Detect numbers that are already international complete numbers from other countries,
+ * preventing them from being mistakenly prefixed with defaultCountry (e.g. +55).
+ */
+export function isForeignInternationalNumber(digits: string, currentDial: string): boolean {
+  if (currentDial !== '55') return false;
+  // Peru: 51 + 9 digits mobile (11 digits) or 51 + 8 digits landline (10 digits)
+  if (digits.startsWith('51') && (digits.length === 11 || digits.length === 10)) return true;
+  // Argentina: 54 + 10-11 digits (12-13 digits)
+  if (digits.startsWith('54') && digits.length >= 12 && digits.length <= 13) return true;
+  // Chile: 56 + 9 digits (11 digits)
+  if (digits.startsWith('56') && digits.length === 11) return true;
+  // Colombia: 57 + 10 digits (12 digits)
+  if (digits.startsWith('57') && digits.length === 12) return true;
+  // Mexico: 52 + 10 digits (12 digits)
+  if (digits.startsWith('52') && (digits.length === 12 || digits.length === 13)) return true;
+  // Venezuela: 58 + 10 digits (12 digits)
+  if (digits.startsWith('58') && digits.length === 12) return true;
+  // Bolivia: 591 + 8 digits (11 digits)
+  if (digits.startsWith('591') && digits.length === 11) return true;
+  // Ecuador: 593 + 9 digits (12 digits)
+  if (digits.startsWith('593') && digits.length === 12) return true;
+  // Spain: 34 + 9 digits (11 digits)
+  if (digits.startsWith('34') && digits.length === 11) return true;
+  // USA / Canada: 1 + 10 digits (11 digits) — NANP area codes always start with 2-9, preventing collision with Brazil DDD 11
+  if (/^1[2-9]\d{9}$/.test(digits)) return true;
+
+  return false;
+}
+
+/**
  * Normalize a raw WhatsApp number/jid into digits + E.164.
  * Strips suffixes like @s.whatsapp.net / @c.us / @lid before processing.
  */
@@ -125,9 +155,10 @@ export function normalizePhone(raw: string, defaultCountry = 'BR'): NormalizedPh
   // Prepend dial code if missing:
   // - If it already starts with the country dial code, it's complete.
   // - If it explicitly came with a '+' or from a WhatsApp JID with valid length, it's already an international number.
+  // - If it is a recognized foreign international number (e.g. Peru 51...), do not prepend default dial code.
   // - Otherwise, if it has local number length, prepend the dial code.
   if (!digits.startsWith(dial)) {
-    if (!hadPlus && !isWhatsAppJid) {
+    if (!hadPlus && !isWhatsAppJid && !isForeignInternationalNumber(digits, dial)) {
       // Local numbers without country code:
       // In Brazil (55): 10 or 11 digits (e.g. 11987654321).
       // In Peru (51): 8 or 9 digits (mobile is 9 digits, e.g. 987654321).
